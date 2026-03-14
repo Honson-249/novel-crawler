@@ -1,0 +1,12 @@
+2026-03-11 16:50:33 | INFO | __main__:run_now:104 - 立即执行爬取任务
+2026-03-11 16:50:33 | INFO | __main__:crawl_job:44 - [2026-03-11 16:50:33] 开始执行定时爬取任务
+2026-03-11 16:50:33 | INFO | src.pipeline.font_mapper:load_mapping:32 - 加载字体映射表：360 个字符映射
+2026-03-11 16:50:55 | INFO | src.pipeline.storage:create_tables:63 - MySQL 数据表创建完成
+2026-03-11 16:50:55 | INFO | src.pipeline.storage:insert_fanqie_batch:125 - 成功插入 3/3 条番茄小说数据
+2026-03-11 16:50:55 | INFO | __main__:crawl_job:57 - [2026-03-11 16:50:33] 爬取任务完成
+2026-03-11 16:51:39 | INFO | __main__:run_now:104 - 立即执行爬取任务
+2026-03-11 16:51:39 | INFO | __main__:crawl_job:44 - [2026-03-11 16:51:39] 开始执行定时爬取任务
+2026-03-11 16:51:39 | INFO | src.pipeline.font_mapper:load_mapping:32 - 加载字体映射表：360 个字符映射
+2026-03-11 16:51:55 | INFO | src.pipeline.storage:create_tables:63 - MySQL 数据表创建完成
+2026-03-11 16:51:55 | INFO | src.pipeline.storage:insert_fanqie_batch:125 - 成功插入 3/3 条番茄小说数据
+2026-03-11 16:51:55 | INFO | __main__:crawl_job:57 - [2026-03-11 16:51:39] 爬取任务完成
