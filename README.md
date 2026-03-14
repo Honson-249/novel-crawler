@@ -70,6 +70,7 @@ python -m cli.main crawl --all --limit 30
 
 # Web API 方式
 python -m cli.main serve
+
 # 访问 http://localhost:8000/docs
 
 # 定时任务方式
