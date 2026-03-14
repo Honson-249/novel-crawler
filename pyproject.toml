@@ -1,0 +1,201 @@
+[project]
+name = "novel-crawler"
+version = "1.0.0"
+description = "小说网站爬取服务 - 已集成番茄小说，支持多站点扩展"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+keywords = [
+    "crawler",
+    "spider",
+    "novel",
+    "fanqie",
+    "web-scraping",
+    "multi-site",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# 运行时依赖
+dependencies = [
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "loguru>=0.7.0",
+    "pymysql>=1.1.0",
+    "playwright>=1.40.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "redis>=5.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "apscheduler>=3.10.0",
+]
+
+[project.optional-dependencies]
+# 开发依赖
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "flake8>=6.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+    "debugpy>=1.8.0",
+]
+# 生产依赖
+prod = [
+    "prometheus-client>=0.19.0",
+    "uvloop>=0.19.0; sys_platform != 'win32'",
+]
+# 完整依赖（全部）
+all = [
+    "novel-crawler[dev,prod]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/novel-crawler"
+Repository = "https://github.com/yourusername/novel-crawler"
+Documentation = "https://github.com/yourusername/novel-crawler/tree/main/docs"
+
+[project.scripts]
+# CLI 入口
+novel-crawler = "cli.main:main"
+fanqie-crawler = "cli.main:main"
+
+# Web API 入口
+novel-api = "src.novel_crawler.main:main"
+fanqie-api = "src.novel_crawler.main:main"
+
+# 定时任务入口
+novel-scheduler = "cli.scheduler:main"
+fanqie-scheduler = "cli.scheduler:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/novel_crawler", "cli"]
+
+# ==================== uv 配置 ====================
+
+# 开发依赖组
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "flake8>=6.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.5.0",
+    "debugpy>=1.8.0",
+]
+
+# ==================== 测试配置 ====================
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "-ra",
+]
+markers = [
+    "unit: 单元测试",
+    "integration: 集成测试",
+    "e2e: 端到端测试",
+    "slow: 慢速测试",
+]
+asyncio_mode = "auto"
+
+# ==================== 代码质量配置 ====================
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = ["tests/", "\\.venv/"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+# ==================== 覆盖率配置 ====================
+
+[tool.coverage.run]
+branch = true
+source = ["src", "cli"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/.venv/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@overload",
+]

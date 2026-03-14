@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# 数据文件（不打包进镜像）
+data/*.db
+data/*.json
+logs/*.log
+
+# 文档
+docs/
+*.md
+!README.md
+
+# 开发文件
+.env
+.env.local
+*.egg-info/
+.eggs/
+
+# 测试文件
+test_*.py
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
