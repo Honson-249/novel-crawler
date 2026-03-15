@@ -42,4 +42,7 @@ build/
 *.egg-info/
 
 # Claude 本地配置
-.claude/settings.local.json
+.claude/
+
+# 测试目录
+tests/
