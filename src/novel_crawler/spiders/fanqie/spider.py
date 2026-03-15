@@ -220,8 +220,14 @@ class FanqieSpider:
         logger.info(f"分类 {cat_name} 完成，共 {len(all_books)} 本书")
         return all_books
 
-    async def crawl_book_detail(self, book: Dict, retry_count: int = 0) -> Dict:
-        """爬取书籍详情页 - 获取章节列表和状态（带人类模拟）"""
+    async def crawl_book_detail(self, book: Dict, retry_count: int = 0, blank_page_retry_count: int = 0) -> Dict:
+        """爬取书籍详情页 - 获取章节列表和状态（带人类模拟）
+
+        Args:
+            book: 书籍信息
+            retry_count: 常规重试次数
+            blank_page_retry_count: 空白页重试次数（触发 1 小时等待）
+        """
         book_id = book.get("book_id")
         if not book_id:
             return book
@@ -256,19 +262,28 @@ class FanqieSpider:
                     await self.browser_manager.refresh_fingerprint()
                     logger.info(f"    [重试] 第 {retry_count + 1} 次重试...")
                     await asyncio.sleep(random.uniform(1, 2))
-                    return await self.crawl_book_detail(book, retry_count + 1)
+                    return await self.crawl_book_detail(book, retry_count + 1, blank_page_retry_count)
 
             # 检查是否为空白页
             is_blank = await self.check_blank_page()
             if is_blank:
                 logger.warning(f"    [警告] 检测到空白页，可能是反爬拦截")
-                if retry_count < self.config.max_retries:
+                # 空白页处理逻辑：先等待 1 小时后再重试
+                if blank_page_retry_count < 3:  # 最多等待 3 次（3 小时）
+                    new_blank_retry_count = blank_page_retry_count + 1
+                    wait_hours = new_blank_retry_count  # 第 1 次等 1 小时，第 2 次等 2 小时，第 3 次等 3 小时
+                    wait_seconds = wait_hours * 3600
+                    logger.warning(f"    [等待] 空白页检测触发，将在 {wait_hours} 小时后重试 (第 {new_blank_retry_count}/3 次)")
+                    await asyncio.sleep(wait_seconds)
+                    return await self.crawl_book_detail(book, retry_count, new_blank_retry_count)
+                elif retry_count < self.config.max_retries:
+                    # 1 小时等待重试用完后，使用常规重试逻辑
                     await self.browser_manager.refresh_fingerprint()
-                    logger.info(f"    [重试] 第 {retry_count + 1} 次重试...")
+                    logger.info(f"    [重试] 第 {retry_count + 1} 次常规重试...")
                     await asyncio.sleep(random.uniform(1, 2))
-                    return await self.crawl_book_detail(book, retry_count + 1)
+                    return await self.crawl_book_detail(book, retry_count + 1, blank_page_retry_count)
                 else:
-                    logger.error(f"    [ERR] 重试{self.config.max_retries}次后仍为空白页，跳过")
+                    logger.error(f"    [ERR] 等待 3 小时且重试{self.config.max_retries}次后仍为空白页，跳过")
                     return book
 
             # 快速滚动到底部加载所有章节
@@ -282,11 +297,22 @@ class FanqieSpider:
             is_blank = await self.check_blank_page()
             if is_blank:
                 logger.warning(f"    [警告] 滚动后检测到空白页")
-                if retry_count < self.config.max_retries:
+                # 滚动后仍然空白页，同样使用 1 小时等待策略
+                if blank_page_retry_count < 3:
+                    new_blank_retry_count = blank_page_retry_count + 1
+                    wait_hours = new_blank_retry_count
+                    wait_seconds = wait_hours * 3600
+                    logger.warning(f"    [等待] 滚动后仍为空白页，将在 {wait_hours} 小时后重试 (第 {new_blank_retry_count}/3 次)")
+                    await asyncio.sleep(wait_seconds)
+                    return await self.crawl_book_detail(book, retry_count, new_blank_retry_count)
+                elif retry_count < self.config.max_retries:
                     await self.browser_manager.refresh_fingerprint()
-                    logger.info(f"    [重试] 第 {retry_count + 1} 次重试...")
+                    logger.info(f"    [重试] 滚动后第 {retry_count + 1} 次常规重试...")
                     await asyncio.sleep(random.uniform(1, 2))
-                    return await self.crawl_book_detail(book, retry_count + 1)
+                    return await self.crawl_book_detail(book, retry_count + 1, blank_page_retry_count)
+                else:
+                    logger.error(f"    [ERR] 滚动后等待 3 小时且重试{self.config.max_retries}次后仍为空白页，跳过")
+                    return book
 
             # 获取页面 HTML
             html = await page.content()

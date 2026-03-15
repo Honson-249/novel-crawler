@@ -1,0 +1,45 @@
+# 环境变量文件
+.env
+!.env.example
+
+# 日志文件
+logs/
+*.log
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+.env/
+.venv/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 浏览器数据
+browser_data/
+
+# 测试产物
+tests/debug/*.png
+tests/debug/*.html
+
+# 数据库文件
+*.db
+*.sqlite
+
+# 构建产物
+dist/
+build/
+*.egg-info/
+
+# Claude 本地配置
+.claude/settings.local.json
