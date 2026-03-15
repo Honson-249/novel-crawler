@@ -244,11 +244,17 @@ class CrawlScheduler:
         logger.info("立即执行爬取任务")
         await self.crawl_job()
 
+    async def run_retry_now(self):
+        """立即执行一次空白页重试任务"""
+        logger.info("立即执行空白页重试任务")
+        await self.retry_crawl_job()
+
 
 async def async_main():
     """异步主函数"""
     parser = argparse.ArgumentParser(description='番茄小说爬虫 - 定时任务调度器')
     parser.add_argument('--once', action='store_true', help='立即执行一次，不启动定时任务')
+    parser.add_argument('--retry', action='store_true', help='立即执行一次空白页重试任务（补充缺失的详情）')
     parser.add_argument('--no-all', action='store_true', help='不爬取所有分类（只爬取第一个分类）')
     parser.add_argument('--limit', type=int, default=30, help='每个分类爬取的书籍数量（默认 30）')
     parser.add_argument('--no-detail', action='store_true', help='不爬取详情页（默认爬取详情）')
@@ -273,13 +279,12 @@ async def async_main():
         minute=args.minute,
         retry_interval=args.retry_interval
     )
-        detail_limit=args.detail_limit,
-        hour=args.hour,
-        minute=args.minute
-    )
 
-    if args.once:
-        # 立即执行一次
+    if args.retry:
+        # 立即执行一次空白页重试任务
+        await scheduler.run_retry_now()
+    elif args.once:
+        # 立即执行一次爬取任务
         await scheduler.run_now()
     else:
         # 启动定时任务

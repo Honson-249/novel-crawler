@@ -14,6 +14,7 @@
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
@@ -147,16 +148,71 @@ class FanqieSpider:
             chapter_area = await page.query_selector('.chapter-list, [class*="chapter"]')
             if not chapter_area:
                 logger.warning("未找到章节列表区域")
-                # 保存页面截图和 HTML 以便调试
-                await page.screenshot(path='debug/no_chapter_page.png')
-                with open('debug/no_chapter_page.html', 'w', encoding='utf-8') as f:
-                    f.write(content[:10000])
                 return True
 
             return False
         except Exception as e:
-            logger.error(f"检查页面失败：{e}")
+            logger.error(f"检查空白页失败：{e}")
             return True
+
+    async def check_no_content(self) -> bool:
+        """检查页面是否显示'抱歉，暂无内容'（小说不存在）"""
+        try:
+            page = self.browser_manager.page
+
+            # 获取页面标题
+            title = await page.title()
+            logger.debug(f"页面标题：{title}")
+
+            # 检查页面标题是否是通用标题（不是具体书名）
+            # 如果标题是"小说，番茄小说网_好看的小说尽在番茄小说官网"，说明是首页或不存在页
+            generic_title_keywords = ["番茄小说网", "好看的小说"]
+            is_generic_title = any(keyword in title for keyword in generic_title_keywords)
+
+            if is_generic_title:
+                logger.info(f"页面标题为通用标题：'{title}'，可能是小说不存在页")
+
+            # 获取页面内容
+            content = await page.content()
+            soup = BeautifulSoup(content, "lxml")
+
+            # 检查常见"无内容"提示文本
+            no_content_keywords = [
+                "抱歉，暂无内容",
+                "暂无内容",
+                "抱歉，本书不存在",
+                "书籍不存在",
+                "内容已下架",
+                "抱歉，无法访问",
+                "本书不存在",
+            ]
+
+            for keyword in no_content_keywords:
+                if keyword in content:
+                    logger.info(f"检测到无内容提示：'{keyword}'")
+                    return True
+
+            # 检查页面主体内容
+            body = soup.find('body')
+            if body:
+                body_text = body.get_text(strip=True)
+                # 如果页面主体内容很短且包含"抱歉"或"暂无"
+                if len(body_text) < 500:
+                    if '抱歉' in body_text or '暂无' in body_text or '不存在' in body_text:
+                        logger.info("页面内容简短且包含无内容提示词")
+                        return True
+
+            # 如果是通用标题且页面中没有找到章节列表，也认为是不存在页
+            if is_generic_title:
+                chapter_area = soup.find(class_=re.compile(r'chapter.*list|chapter.*wrap|scroll.*wrap', re.I))
+                if not chapter_area:
+                    logger.info("页面是通用标题且没有章节列表，认定小说不存在")
+                    return True
+
+            return False
+        except Exception as e:
+            logger.error(f"检查无内容失败：{e}")
+            return False
 
     async def crawl_rank_home(self) -> List[Dict[str, str]]:
         """爬取榜单首页，获取分类列表"""
@@ -279,6 +335,15 @@ class FanqieSpider:
             # 检查是否为空白页
             is_blank = await self.check_blank_page()
             if is_blank:
+                # 先检查是否是"小说不存在"页面（不是反爬空白页）
+                is_no_content = await self.check_no_content()
+                if is_no_content:
+                    logger.warning(f"    [不存在] 检测到'暂无内容'提示，认定此书不存在")
+                    book["book_status"] = "已完结"
+                    book["chapter_list_json"] = json.dumps(["不存在"], ensure_ascii=False)
+                    return book, False  # 标记为完成，章节为 ["不存在"]
+
+                # 是真正的反爬空白页，才进行重试
                 logger.warning(f"    [警告] 检测到空白页，可能是反爬拦截")
                 if retry_count < self.config.max_retries:
                     await self.browser_manager.refresh_fingerprint()
@@ -287,11 +352,21 @@ class FanqieSpider:
                     result = await self.crawl_book_detail(book, retry_count + 1)
                     return result
                 else:
-                    # 重试失败，触发空白页保护模式
-                    logger.error(f"    [ERR] 重试{self.config.max_retries}次后仍为空白页，触发保护模式")
-                    self.blank_page_detected = True
-                    self.blank_page_failure_count += 1
-                    return book, True
+                    # 重试失败，检查是否显示"暂无内容"
+                    logger.error(f"    [ERR] 重试{self.config.max_retries}次后仍为空白页")
+                    # 检查页面是否显示"抱歉，暂无内容"
+                    is_no_content = await self.check_no_content()
+                    if is_no_content:
+                        logger.warning(f"    [不存在] 检测到'暂无内容'提示，认定此书不存在")
+                        book["book_status"] = "已完结"
+                        book["chapter_list_json"] = json.dumps(["不存在"], ensure_ascii=False)
+                        return book, False  # 标记为完成，章节为["不存在"]
+                    else:
+                        # 真正的空白页/反爬拦截，触发保护模式
+                        logger.error(f"    [ERR] 非'暂无内容'，触发空白页保护模式")
+                        self.blank_page_detected = True
+                        self.blank_page_failure_count += 1
+                        return book, True
 
             # 快速滚动到底部加载所有章节
             await self.human_simulator.human_scroll_to_bottom()
@@ -303,6 +378,15 @@ class FanqieSpider:
             # 再次检查页面是否有效
             is_blank = await self.check_blank_page()
             if is_blank:
+                # 先检查是否是"小说不存在"页面（不是反爬空白页）
+                is_no_content = await self.check_no_content()
+                if is_no_content:
+                    logger.warning(f"    [不存在] 检测到'暂无内容'提示，认定此书不存在")
+                    book["book_status"] = "已完结"
+                    book["chapter_list_json"] = json.dumps(["不存在"], ensure_ascii=False)
+                    return book, False  # 标记为完成，章节为 ["不存在"]
+
+                # 是真正的反爬空白页，才进行重试
                 logger.warning(f"    [警告] 滚动后检测到空白页")
                 if retry_count < self.config.max_retries:
                     await self.browser_manager.refresh_fingerprint()
@@ -311,11 +395,21 @@ class FanqieSpider:
                     result = await self.crawl_book_detail(book, retry_count + 1)
                     return result
                 else:
-                    # 滚动后重试失败，触发空白页保护模式
-                    logger.error(f"    [ERR] 滚动后重试{self.config.max_retries}次仍为空白页，触发保护模式")
-                    self.blank_page_detected = True
-                    self.blank_page_failure_count += 1
-                    return book, True
+                    # 滚动后重试失败，检查是否显示"暂无内容"
+                    logger.error(f"    [ERR] 滚动后重试{self.config.max_retries}次仍为空白页")
+                    # 检查页面是否显示"抱歉，暂无内容"
+                    is_no_content = await self.check_no_content()
+                    if is_no_content:
+                        logger.warning(f"    [不存在] 检测到'暂无内容'提示，认定此书不存在")
+                        book["book_status"] = "已完结"
+                        book["chapter_list_json"] = json.dumps(["不存在"], ensure_ascii=False)
+                        return book, False  # 标记为完成，章节为["不存在"]
+                    else:
+                        # 真正的空白页/反爬拦截，触发保护模式
+                        logger.error(f"    [ERR] 非'暂无内容'，触发空白页保护模式")
+                        self.blank_page_detected = True
+                        self.blank_page_failure_count += 1
+                        return book, True
 
             # 获取页面 HTML
             html = await page.content()
@@ -336,7 +430,19 @@ class FanqieSpider:
                         f"更新时间={detail_data['detail_update_time'] or 'N/A'}")
 
         except Exception as e:
+            error_msg = str(e)
             logger.error(f"    [ERR] 详情获取失败：{e}")
+
+            # 检查是否是浏览器被关闭的错误
+            if "has been closed" in error_msg or "browser has been closed" in error_msg:
+                logger.warning("    [警告] 浏览器页面已关闭，尝试重新初始化浏览器...")
+                try:
+                    await self.init_browser()
+                    logger.info("    [OK] 浏览器重新初始化完成")
+                except Exception as init_error:
+                    logger.error(f"    [ERR] 重新初始化浏览器失败：{init_error}")
+                    return book, True
+
             if retry_count < self.config.max_retries:
                 logger.info(f"    [重试] 异常后第 {retry_count + 1} 次重试...")
                 await self.browser_manager.refresh_fingerprint()
@@ -406,10 +512,9 @@ class FanqieSpider:
             # 爬取详情
             result, is_blank_failure = await self.crawl_book_detail(book)
 
-            # 如果触发空白页保护，后续全部从数据库获取
+            # 如果爬取失败（is_blank_failure=True），从数据库获取历史数据
             if is_blank_failure:
-                logger.warning(f"    [警告] 爬取失败，触发降级逻辑")
-                # 当前这本书也直接从数据库获取
+                logger.warning(f"    [警告] 爬取失败，尝试从数据库获取历史数据")
                 db_status = self.chapter_service.get_book_status(book_id)
                 if db_status:
                     if db_status == '已完结':
@@ -433,13 +538,13 @@ class FanqieSpider:
                     logger.warning(f"    [失败] 数据库中无此书记录")
                 continue
 
-            # 如果有章节数据，保存到数据库并设置缓存
-            if result and result.get('chapter_list_json'):
+            # 保存详情数据（包括"不存在"状态）
+            if result:
                 success = self.data_processor.save_book_detail(
                     book_id=book_id,
                     batch_date=self.batch_date,
                     book_status=result.get('book_status', '连载中'),
-                    chapter_list_json=result['chapter_list_json']
+                    chapter_list_json=result.get('chapter_list_json', '[]')
                 )
                 if success:
                     # 设置缓存 - 保留原有的 book_update_time
@@ -448,29 +553,10 @@ class FanqieSpider:
                     set_book_cache(book_id, result.get('book_status', '连载中'), get_utc8_now_str(), book_update_time)
                     details_count += 1
                     logger.info(" [OK] 已更新详情并缓存")
-            else:
-                # 爬取失败，尝试从数据库查询历史数据作为降级方案
-                db_status = self.chapter_service.get_book_status(book_id)
-                if db_status:
-                    if db_status == '已完结':
-                        reused = self.chapter_service.copy_chapters_from_history_by_status(
-                            book_id=book_id,
-                            batch_date=self.batch_date,
-                            book_status='已完结'
-                        )
-                    else:
-                        reused = self.chapter_service.reuse_chapters_if_unchanged(
-                            book_id=book_id,
-                            batch_date=self.batch_date
-                        )
-
-                    if reused:
-                        db_fallback_count += 1
-                        logger.info(f"[降级] 爬取失败，从数据库获取历史数据（状态：{db_status}）")
-                    else:
-                        logger.warning(f"[失败] 爬取失败且数据库中无历史数据")
                 else:
-                    logger.warning(f"[失败] 爬取失败且数据库中无此书记录")
+                    logger.warning(f"    [失败] 保存到数据库失败")
+            else:
+                logger.warning(f"    [失败] 爬取结果为空")
 
             # 随机延迟
             await asyncio.sleep(random.uniform(0.5, 1))
