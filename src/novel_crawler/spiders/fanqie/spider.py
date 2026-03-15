@@ -14,8 +14,6 @@
 
 import asyncio
 import json
-import os
-import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
@@ -95,6 +93,10 @@ class FanqieSpider:
 
         # 状态
         self.batch_date = get_utc8_date()
+
+        # 空白页标记 - 触发后后续请求直接查数据库
+        self.blank_page_detected = False
+        self.blank_page_failure_count = 0
 
     def _create_cache_manager(self):
         """创建缓存管理器包装类"""
@@ -220,17 +222,24 @@ class FanqieSpider:
         logger.info(f"分类 {cat_name} 完成，共 {len(all_books)} 本书")
         return all_books
 
-    async def crawl_book_detail(self, book: Dict, retry_count: int = 0, blank_page_retry_count: int = 0) -> Dict:
+    async def crawl_book_detail(self, book: Dict, retry_count: int = 0) -> Tuple[Dict, bool]:
         """爬取书籍详情页 - 获取章节列表和状态（带人类模拟）
 
         Args:
             book: 书籍信息
             retry_count: 常规重试次数
-            blank_page_retry_count: 空白页重试次数（触发 1 小时等待）
+
+        Returns:
+            (book_data, is_blank_page_failure) - 书籍数据和是否空白页失败
         """
         book_id = book.get("book_id")
         if not book_id:
-            return book
+            return book, False
+
+        # 如果已经触发空白页保护，直接返回并标记需要从数据库获取
+        if self.blank_page_detected:
+            logger.warning(f"    [降级] 空白页保护已触发，跳过爬取，将从数据库获取历史数据")
+            return book, True
 
         # 添加 enter_from=Rank 参数，模拟从排行榜进入
         detail_url = f"{self.config.base_url}/page/{book_id}?enter_from=Rank"
@@ -262,29 +271,27 @@ class FanqieSpider:
                     await self.browser_manager.refresh_fingerprint()
                     logger.info(f"    [重试] 第 {retry_count + 1} 次重试...")
                     await asyncio.sleep(random.uniform(1, 2))
-                    return await self.crawl_book_detail(book, retry_count + 1, blank_page_retry_count)
+                    return await self.crawl_book_detail(book, retry_count + 1)
+                else:
+                    # 重定向重试失败，标记为需要从数据库获取
+                    return book, True
 
             # 检查是否为空白页
             is_blank = await self.check_blank_page()
             if is_blank:
                 logger.warning(f"    [警告] 检测到空白页，可能是反爬拦截")
-                # 空白页处理逻辑：先等待 1 小时后再重试
-                if blank_page_retry_count < 3:  # 最多等待 3 次（3 小时）
-                    new_blank_retry_count = blank_page_retry_count + 1
-                    wait_hours = new_blank_retry_count  # 第 1 次等 1 小时，第 2 次等 2 小时，第 3 次等 3 小时
-                    wait_seconds = wait_hours * 3600
-                    logger.warning(f"    [等待] 空白页检测触发，将在 {wait_hours} 小时后重试 (第 {new_blank_retry_count}/3 次)")
-                    await asyncio.sleep(wait_seconds)
-                    return await self.crawl_book_detail(book, retry_count, new_blank_retry_count)
-                elif retry_count < self.config.max_retries:
-                    # 1 小时等待重试用完后，使用常规重试逻辑
+                if retry_count < self.config.max_retries:
                     await self.browser_manager.refresh_fingerprint()
-                    logger.info(f"    [重试] 第 {retry_count + 1} 次常规重试...")
+                    logger.info(f"    [重试] 第 {retry_count + 1} 次重试...")
                     await asyncio.sleep(random.uniform(1, 2))
-                    return await self.crawl_book_detail(book, retry_count + 1, blank_page_retry_count)
+                    result = await self.crawl_book_detail(book, retry_count + 1)
+                    return result
                 else:
-                    logger.error(f"    [ERR] 等待 3 小时且重试{self.config.max_retries}次后仍为空白页，跳过")
-                    return book
+                    # 重试失败，触发空白页保护模式
+                    logger.error(f"    [ERR] 重试{self.config.max_retries}次后仍为空白页，触发保护模式")
+                    self.blank_page_detected = True
+                    self.blank_page_failure_count += 1
+                    return book, True
 
             # 快速滚动到底部加载所有章节
             await self.human_simulator.human_scroll_to_bottom()
@@ -297,22 +304,18 @@ class FanqieSpider:
             is_blank = await self.check_blank_page()
             if is_blank:
                 logger.warning(f"    [警告] 滚动后检测到空白页")
-                # 滚动后仍然空白页，同样使用 1 小时等待策略
-                if blank_page_retry_count < 3:
-                    new_blank_retry_count = blank_page_retry_count + 1
-                    wait_hours = new_blank_retry_count
-                    wait_seconds = wait_hours * 3600
-                    logger.warning(f"    [等待] 滚动后仍为空白页，将在 {wait_hours} 小时后重试 (第 {new_blank_retry_count}/3 次)")
-                    await asyncio.sleep(wait_seconds)
-                    return await self.crawl_book_detail(book, retry_count, new_blank_retry_count)
-                elif retry_count < self.config.max_retries:
+                if retry_count < self.config.max_retries:
                     await self.browser_manager.refresh_fingerprint()
-                    logger.info(f"    [重试] 滚动后第 {retry_count + 1} 次常规重试...")
+                    logger.info(f"    [重试] 滚动后第 {retry_count + 1} 次重试...")
                     await asyncio.sleep(random.uniform(1, 2))
-                    return await self.crawl_book_detail(book, retry_count + 1, blank_page_retry_count)
+                    result = await self.crawl_book_detail(book, retry_count + 1)
+                    return result
                 else:
-                    logger.error(f"    [ERR] 滚动后等待 3 小时且重试{self.config.max_retries}次后仍为空白页，跳过")
-                    return book
+                    # 滚动后重试失败，触发空白页保护模式
+                    logger.error(f"    [ERR] 滚动后重试{self.config.max_retries}次仍为空白页，触发保护模式")
+                    self.blank_page_detected = True
+                    self.blank_page_failure_count += 1
+                    return book, True
 
             # 获取页面 HTML
             html = await page.content()
@@ -339,8 +342,12 @@ class FanqieSpider:
                 await self.browser_manager.refresh_fingerprint()
                 await asyncio.sleep(random.uniform(1, 2))
                 return await self.crawl_book_detail(book, retry_count + 1)
+            else:
+                # 异常重试失败，标记为需要从数据库获取
+                logger.error(f"    [ERR] 异常重试{self.config.max_retries}次后仍失败")
+                return book, True
 
-        return book
+        return book, False
 
     async def _crawl_details_batch(self, books: List[Dict]) -> Tuple[int, int, int, int]:
         """
@@ -363,14 +370,68 @@ class FanqieSpider:
         logger.info(f"\n开始爬取书籍详情...（共 {len(books_to_crawl)} 本需要爬取）")
 
         details_count = 0
+        db_fallback_count = 0
 
         for idx, book in enumerate(books_to_crawl, 1):
             book_title_safe = book['book_title'].encode('gbk', 'ignore').decode('gbk', 'ignore')
             book_id = book.get('book_id')
             logger.info(f"[{idx}/{len(books_to_crawl)}] {book_title_safe}")
 
+            # 检查是否已触发空白页保护
+            if self.blank_page_detected:
+                # 直接从数据库获取历史数据
+                db_status = self.chapter_service.get_book_status(book_id)
+                if db_status:
+                    if db_status == '已完结':
+                        reused = self.chapter_service.copy_chapters_from_history_by_status(
+                            book_id=book_id,
+                            batch_date=self.batch_date,
+                            book_status='已完结'
+                        )
+                    else:
+                        reused = self.chapter_service.reuse_chapters_if_unchanged(
+                            book_id=book_id,
+                            batch_date=self.batch_date
+                        )
+
+                    if reused:
+                        db_fallback_count += 1
+                        logger.info(f"    [降级] 从数据库获取历史数据（状态：{db_status}）")
+                    else:
+                        logger.warning(f"    [失败] 数据库中无历史数据")
+                else:
+                    logger.warning(f"    [失败] 数据库中无此书记录")
+                continue
+
             # 爬取详情
-            result = await self.crawl_book_detail(book)
+            result, is_blank_failure = await self.crawl_book_detail(book)
+
+            # 如果触发空白页保护，后续全部从数据库获取
+            if is_blank_failure:
+                logger.warning(f"    [警告] 爬取失败，触发降级逻辑")
+                # 当前这本书也直接从数据库获取
+                db_status = self.chapter_service.get_book_status(book_id)
+                if db_status:
+                    if db_status == '已完结':
+                        reused = self.chapter_service.copy_chapters_from_history_by_status(
+                            book_id=book_id,
+                            batch_date=self.batch_date,
+                            book_status='已完结'
+                        )
+                    else:
+                        reused = self.chapter_service.reuse_chapters_if_unchanged(
+                            book_id=book_id,
+                            batch_date=self.batch_date
+                        )
+
+                    if reused:
+                        db_fallback_count += 1
+                        logger.info(f"    [降级] 从数据库获取历史数据（状态：{db_status}）")
+                    else:
+                        logger.warning(f"    [失败] 数据库中无历史数据")
+                else:
+                    logger.warning(f"    [失败] 数据库中无此书记录")
+                continue
 
             # 如果有章节数据，保存到数据库并设置缓存
             if result and result.get('chapter_list_json'):
@@ -404,16 +465,25 @@ class FanqieSpider:
                         )
 
                     if reused:
-                        logger.info(f"[降级] {book_title_safe} - 爬取失败，从数据库获取历史数据（状态：{db_status}）")
+                        db_fallback_count += 1
+                        logger.info(f"[降级] 爬取失败，从数据库获取历史数据（状态：{db_status}）")
                     else:
-                        logger.warning(f"[失败] {book_title_safe} - 爬取失败且数据库中无历史数据")
+                        logger.warning(f"[失败] 爬取失败且数据库中无历史数据")
                 else:
-                    logger.warning(f"[失败] {book_title_safe} - 爬取失败且数据库中无此书记录")
+                    logger.warning(f"[失败] 爬取失败且数据库中无此书记录")
 
             # 随机延迟
             await asyncio.sleep(random.uniform(0.5, 1))
 
-        return (details_count, skipped_count, cached_count, reused_count)
+        # 记录统计信息
+        if self.blank_page_detected:
+            remaining_count = len(books_to_crawl) - db_fallback_count - details_count
+            logger.warning("=" * 60)
+            logger.warning(f"[空白页保护] 触发降级模式，剩余 {remaining_count} 本小说未爬取详情")
+            logger.warning(f"[降级统计] 从数据库获取 {db_fallback_count} 本，成功爬取 {details_count} 本")
+            logger.warning("=" * 60)
+
+        return (details_count, skipped_count, cached_count, reused_count + db_fallback_count)
 
     async def run(self, crawl_all: bool = False, target_category_idx: int = 0,
                   limit: int = 30, crawl_detail: bool = False,
@@ -602,12 +672,67 @@ class FanqieSpider:
                 # 爬取详情
                 success_count = 0
                 reused_count_from_crawl = 0
+                db_fallback_count = 0
 
                 for idx, book in enumerate(books_to_crawl, 1):
                     book_title_safe = book['book_title'].encode('gbk', 'ignore').decode('gbk', 'ignore')
                     logger.info(f"[{idx}/{len(books_to_crawl)}] {book_title_safe}")
 
-                    result = await self.crawl_book_detail(book)
+                    # 检查是否已触发空白页保护
+                    if self.blank_page_detected:
+                        # 直接从数据库获取历史数据
+                        db_status = self.chapter_service.get_book_status(book['book_id'])
+                        if db_status:
+                            if db_status == '已完结':
+                                reused = self.chapter_service.copy_chapters_from_history_by_status(
+                                    book_id=book['book_id'],
+                                    batch_date=self.batch_date,
+                                    book_status='已完结'
+                                )
+                            else:
+                                reused = self.chapter_service.reuse_chapters_if_unchanged(
+                                    book_id=book['book_id'],
+                                    batch_date=self.batch_date
+                                )
+
+                            if reused:
+                                db_fallback_count += 1
+                                logger.info(f"    [降级] 从数据库获取历史数据（状态：{db_status}）")
+                            else:
+                                logger.warning(f"    [失败] 数据库中无历史数据")
+                        else:
+                            logger.warning(f"    [失败] 数据库中无此书记录")
+                        continue
+
+                    # 爬取详情
+                    result, is_blank_failure = await self.crawl_book_detail(book)
+
+                    # 如果触发空白页保护，后续全部从数据库获取
+                    if is_blank_failure:
+                        logger.warning(f"    [警告] 爬取失败，触发降级逻辑")
+                        # 当前这本书也直接从数据库获取
+                        db_status = self.chapter_service.get_book_status(book['book_id'])
+                        if db_status:
+                            if db_status == '已完结':
+                                reused = self.chapter_service.copy_chapters_from_history_by_status(
+                                    book_id=book['book_id'],
+                                    batch_date=self.batch_date,
+                                    book_status='已完结'
+                                )
+                            else:
+                                reused = self.chapter_service.reuse_chapters_if_unchanged(
+                                    book_id=book['book_id'],
+                                    batch_date=self.batch_date
+                                )
+
+                            if reused:
+                                db_fallback_count += 1
+                                logger.info(f"    [降级] 从数据库获取历史数据（状态：{db_status}）")
+                            else:
+                                logger.warning(f"    [失败] 数据库中无历史数据")
+                        else:
+                            logger.warning(f"    [失败] 数据库中无此书记录")
+                        continue
 
                     if result and result.get('chapter_list_json'):
                         # 保存到数据库（单条立即更新）
@@ -624,8 +749,6 @@ class FanqieSpider:
                             set_book_cache(book['book_id'], result.get('book_status', '连载中'), get_utc8_now_str(), book_update_time)
                             success_count += 1
                             logger.info(" [OK] 已更新详情并缓存")
-                        else:
-                            logger.warning(f"[DB 失败] {book_title_safe} - 数据库更新失败")
                     else:
                         # 爬取失败，尝试从历史数据复用
                         db_status = self.chapter_service.get_book_status(book['book_id'])
@@ -660,8 +783,12 @@ class FanqieSpider:
                 logger.info(f"[OK] 补充爬取完成：成功 {success_count}/{len(books_to_crawl)} 本")
                 if reused_count_from_crawl > 0:
                     logger.info(f"[复用] 从数据库复用 {reused_count_from_crawl} 本书的历史数据")
+                if db_fallback_count > 0:
+                    logger.info(f"[降级] 从数据库获取 {db_fallback_count} 本书的历史数据")
+                if self.blank_page_detected:
+                    logger.warning(f"[空白页保护] 触发降级模式，剩余 {remaining_count} 本小说未爬取")
                 if remaining_count > 0:
-                    logger.info(f"[注意] 仍有 {remaining_count} 本书缺少章节数据（可能是爬取失败且无历史数据）")
+                    logger.info(f"[注意] 仍有 {remaining_count} 本书缺少章节数据")
                 else:
                     logger.info("[OK] 所有书籍章节数据完整")
                 logger.info("=" * 60)
