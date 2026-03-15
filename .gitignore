@@ -46,3 +46,6 @@ build/
 
 # 测试目录
 tests/
+
+# 调试目录
+debug/
