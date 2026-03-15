@@ -7,7 +7,7 @@ services:
     build: .
     container_name: fanqie-crawler
     environment:
-      - APP_ENV=${APP_ENV:-test}
+      - APP_ENV=${APP_ENV:-prod}
       - MYSQL_HOST=${MYSQL_HOST:-localhost}
       - MYSQL_PORT=${MYSQL_PORT:-3306}
       - MYSQL_USER=${MYSQL_USER:-root}
