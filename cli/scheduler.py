@@ -42,7 +42,8 @@ class CrawlScheduler:
 
     def __init__(self, crawl_all: bool = True, limit: int = 30, detail: bool = False,
                  crawl_detail_later: bool = False, auto: bool = False,
-                 hour: int = 0, minute: int = 0, detail_limit: int = 0):
+                 hour: int = 0, minute: int = 0, detail_limit: int = 0,
+                 retry_interval: int = 2):
         self.crawl_all = crawl_all
         self.limit = limit
         self.detail = detail
@@ -51,6 +52,7 @@ class CrawlScheduler:
         self.detail_limit = detail_limit  # 补充详情时的数量限制
         self.hour = hour
         self.minute = minute
+        self.retry_interval = retry_interval  # 空白页重试间隔（小时）
         self.scheduler = None
         self.is_running = False
 
@@ -79,6 +81,12 @@ class CrawlScheduler:
                 result_phase2 = await spider.crawl_missing_details(limit=self.detail_limit)
                 first_round_remaining = result_phase2.get('remaining', 0)
 
+                # 检查是否触发空白页保护
+                if spider.blank_page_detected:
+                    logger.warning(f"{log_prefix} [空白页保护] 触发降级模式，剩余 {first_round_remaining} 本小说未爬取")
+                    logger.warning(f"{log_prefix} [提示] 将在 {self.retry_interval} 小时后自动重试")
+                    return
+
                 # 第二轮：完整重跑两阶段（应对榜单页遗漏 + 详情页遗漏）
                 if first_round_remaining > 0:
                     logger.info(f"{log_prefix} 【第二轮】检测到 {first_round_remaining} 本书缺失，开始完整重跑两阶段（查缺补漏）")
@@ -97,6 +105,12 @@ class CrawlScheduler:
                     # 第二轮 - 阶段 2: 再次补充详情页
                     logger.info(f"{log_prefix} 【第二轮】阶段 2: 再次补充爬取详情页")
                     result_phase4 = await spider.crawl_missing_details(limit=self.detail_limit)
+
+                    # 检查是否触发空白页保护
+                    if spider.blank_page_detected:
+                        logger.warning(f"{log_prefix} [空白页保护] 触发降级模式，剩余 {result_phase4.get('remaining', 0)} 本小说未爬取")
+                        logger.warning(f"{log_prefix} [提示] 将在 {self.retry_interval} 小时后自动重试")
+                        return
 
                     if result_phase4.get('remaining', 0) > 0:
                         logger.warning(f"{log_prefix} [注意] 两轮爬取后仍有 {result_phase4['remaining']} 本书无法获取章节数据")
@@ -157,13 +171,24 @@ class CrawlScheduler:
             replace_existing=True
         )
 
+        # 添加空白页重试任务 - 每 2 小时执行一次
+        self.scheduler.add_job(
+            self.retry_crawl_job,
+            trigger='interval',
+            hours=self.retry_interval,
+            id='retry_crawl',
+            name='空白页重试任务',
+            replace_existing=True
+        )
+
         # 启动调度器
         self.scheduler.start()
         self.is_running = True
 
-        log_msg = f"调度器已启动 - 每天 {self.hour:02d}:{self.minute:02d} 自动爬取"
+        log_msg = f"调度器已启动 - 每天 {self.hour:02d}:{self.minute:02d} 自动爬取，每{self.retry_interval}小时重试"
         logger.info(log_msg)
-        logger.info(f"下次执行时间：{self.scheduler.get_job('daily_crawl').next_run_time}")
+        logger.info(f"下次每日任务执行时间：{self.scheduler.get_job('daily_crawl').next_run_time}")
+        logger.info(f"下次重试任务执行时间：{self.scheduler.get_job('retry_crawl').next_run_time}")
 
         # 保持运行
         try:
@@ -171,6 +196,40 @@ class CrawlScheduler:
                 await asyncio.sleep(1)
         except (KeyboardInterrupt, SystemExit):
             await self.shutdown()
+
+    async def retry_crawl_job(self):
+        """空白页重试任务 - 每 2 小时执行一次"""
+        log_prefix = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
+        logger.info(f"{log_prefix} 开始执行空白页重试任务")
+
+        spider = None
+        try:
+            spider = FanqieSpider()
+
+            # 只补充爬取缺失的详情页
+            logger.info(f"{log_prefix} 补充爬取缺失章节的书籍")
+            result = await spider.crawl_missing_details(limit=self.detail_limit)
+
+            # 检查是否仍有缺失
+            remaining = result.get('remaining', 0)
+            if remaining > 0:
+                if spider.blank_page_detected:
+                    logger.warning(f"{log_prefix} [空白页保护] 仍有 {remaining} 本书无法获取，将在 {self.retry_interval} 小时后继续重试")
+                else:
+                    logger.warning(f"{log_prefix} [注意] 仍有 {remaining} 本书缺少章节数据（可能是新书无历史数据）")
+            else:
+                logger.info(f"{log_prefix} [OK] 所有书籍章节数据完整，恢复正常爬取模式")
+
+        except Exception as e:
+            logger.error(f"{log_prefix} 重试任务失败：{e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            if spider:
+                try:
+                    await spider.close()
+                except Exception:
+                    pass
 
     async def shutdown(self):
         """关闭调度器"""
@@ -198,6 +257,7 @@ async def async_main():
     parser.add_argument('--detail-limit', type=int, default=0, help='补充详情时最多爬取多少本，0 表示全部')
     parser.add_argument('--hour', type=int, default=0, help='定时任务执行时间 - 小时（0-23，默认 0 点）')
     parser.add_argument('--minute', type=int, default=0, help='定时任务执行时间 - 分钟（0-59，默认 0 分）')
+    parser.add_argument('--retry-interval', type=int, default=2, help='空白页重试间隔（小时，默认 2 小时）')
 
     args = parser.parse_args()
 
@@ -208,6 +268,11 @@ async def async_main():
         detail=not args.no_detail,  # 默认爬取详情
         crawl_detail_later=args.later,
         auto=True,  # 默认启用自动两阶段 + 第二轮重检
+        detail_limit=args.detail_limit,
+        hour=args.hour,
+        minute=args.minute,
+        retry_interval=args.retry_interval
+    )
         detail_limit=args.detail_limit,
         hour=args.hour,
         minute=args.minute
