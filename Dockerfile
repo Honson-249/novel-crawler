@@ -21,19 +21,35 @@ RUN apt-get update && apt-get install -y \
     && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
     && apt-get install -y nodejs
 
-# 复制依赖文件
-COPY pyproject.toml .
-COPY README.md .
-
-# 安装 Python 依赖
-RUN pip install --no-cache-dir .
+# 安装 Playwright 浏览器依赖
+RUN apt-get update && apt-get install -y \
+    libglib2.0-0 \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libdbus-1-3 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    && rm -rf /var/lib/apt/lists/*
 
 # 复制项目文件
 COPY . .
 
-# 安装 Playwright 和浏览器
-RUN playwright install chromium \
-    && playwright install-deps chromium 2>/dev/null || true
+# 安装 Python 依赖
+RUN pip install --no-cache-dir .
+
+# 安装 Playwright 和浏览器 (不依赖 install-deps)
+RUN playwright install chromium
 
 # 创建数据目录和日志目录
 RUN mkdir -p /app/data /app/logs
