@@ -10,10 +10,16 @@
 """
 
 import sys
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator
+
+# 修复 Windows 上 Python 3.12+ 与 Playwright 的兼容性问题
+# Playwright 需要使用 SelectorEventLoop 来支持子进程
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,7 +46,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     - 关闭时：清理资源、关闭调度器
     """
     # 启动时执行
-    logger.info("Novel Crawler 服务启动中...")
+    app_version = app.version
+    logger.info(f"Novel Crawler 服务启动中... [版本 v{app_version}]")
 
     # 初始化任务服务并启动定时任务
     task_service = get_task_service()
@@ -153,6 +160,8 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
+        reload=False,  # 关闭热重载，避免与 Playwright 子进程冲突
         log_level="info",
+        # 在 uvicorn 启动日志中显示版本号
+        server_header=False,  # 隐藏默认服务器头
     )
