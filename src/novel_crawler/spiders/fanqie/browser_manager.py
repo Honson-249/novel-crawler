@@ -2,6 +2,7 @@
 """
 浏览器管理模块 - 负责浏览器和上下表的 lifecycle 管理
 """
+import asyncio
 import random
 from pathlib import Path
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
