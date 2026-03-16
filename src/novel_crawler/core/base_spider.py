@@ -3,6 +3,7 @@
 爬虫抽象基类
 定义爬虫的标准接口和通用功能
 """
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
