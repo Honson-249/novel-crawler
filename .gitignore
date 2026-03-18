@@ -35,6 +35,7 @@ tests/debug/*.html
 # 数据库文件
 *.db
 *.sqlite
+data/
 
 # 构建产物
 dist/
