@@ -40,30 +40,10 @@ class FanqieRankDAO:
 
         conn = self.db_manager.get_connection()
         cursor = conn.cursor()
-        inserted = 0
 
         try:
-            for record in records:
-                chapter_json = self._normalize_chapter_json(record.get("chapter_list_json"))
-
-                cursor.execute("""
-                    INSERT INTO fanqie_ranks
-                    (batch_date, board_name, sub_category, rank_num, book_id,
-                     book_title, author_name, metric_name, metric_value_raw,
-                     metric_value, tags, book_status, synopsis, chapter_list_json,
-                     cover_url, detail_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                    rank_num = VALUES(rank_num),
-                    book_title = VALUES(book_title),
-                    author_name = VALUES(author_name),
-                    metric_name = VALUES(metric_name),
-                    metric_value_raw = VALUES(metric_value_raw),
-                    metric_value = VALUES(metric_value),
-                    book_status = VALUES(book_status),
-                    synopsis = VALUES(synopsis),
-                    updated_at = CURRENT_TIMESTAMP
-                """, (
+            params_list = [
+                (
                     batch_date,
                     record.get("board_name"),
                     record.get("sub_category"),
@@ -77,12 +57,33 @@ class FanqieRankDAO:
                     record.get("tags"),
                     record.get("book_status"),
                     record.get("synopsis"),
-                    chapter_json,
+                    self._normalize_chapter_json(record.get("chapter_list_json")),
                     record.get("cover_url"),
                     record.get("detail_url"),
-                ))
-                inserted += 1
+                )
+                for record in records
+            ]
 
+            cursor.executemany("""
+                INSERT INTO fanqie_ranks
+                (batch_date, board_name, sub_category, rank_num, book_id,
+                 book_title, author_name, metric_name, metric_value_raw,
+                 metric_value, tags, book_status, synopsis, chapter_list_json,
+                 cover_url, detail_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                rank_num = VALUES(rank_num),
+                book_title = VALUES(book_title),
+                author_name = VALUES(author_name),
+                metric_name = VALUES(metric_name),
+                metric_value_raw = VALUES(metric_value_raw),
+                metric_value = VALUES(metric_value),
+                book_status = VALUES(book_status),
+                synopsis = VALUES(synopsis),
+                updated_at = CURRENT_TIMESTAMP
+            """, params_list)
+
+            inserted = len(params_list)
             conn.commit()
             logger.info(f"[DAO] 成功插入 {inserted}/{len(records)} 条记录")
             return inserted
@@ -150,24 +151,25 @@ class FanqieRankDAO:
 
         conn = self.db_manager.get_connection()
         cursor = conn.cursor()
-        updated_count = 0
 
         try:
-            for update in updates:
-                chapter_json = self._normalize_chapter_json(update.get('chapter_list_json'))
-
-                cursor.execute("""
-                    UPDATE fanqie_ranks
-                    SET book_status = %s, chapter_list_json = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE book_id = %s AND batch_date = %s
-                """, (
+            params_list = [
+                (
                     update.get('book_status', '连载中'),
-                    chapter_json,
+                    self._normalize_chapter_json(update.get('chapter_list_json')),
                     update.get('book_id'),
-                    batch_date
-                ))
-                updated_count += 1
+                    batch_date,
+                )
+                for update in updates
+            ]
 
+            cursor.executemany("""
+                UPDATE fanqie_ranks
+                SET book_status = %s, chapter_list_json = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE book_id = %s AND batch_date = %s
+            """, params_list)
+
+            updated_count = len(params_list)
             conn.commit()
             logger.info(f"[DAO] 批量更新 {updated_count} 条记录")
             return updated_count
@@ -314,13 +316,15 @@ class FanqieRankDAO:
         finally:
             conn.close()
 
-    def find_book_by_id(self, book_id: str, batch_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def find_book_by_id(self, book_id: str, batch_date: Optional[str] = None,
+                        include_chapter_json: bool = False) -> Optional[Dict[str, Any]]:
         """
         根据 book_id 查询书籍信息
 
         Args:
             book_id: 书籍 ID
             batch_date: 可选的批次日期，不传则返回最新一条
+            include_chapter_json: 是否包含 chapter_list_json 字段，默认不包含以避免拉取大字段
 
         Returns:
             书籍记录字典，不存在返回 None
@@ -328,16 +332,25 @@ class FanqieRankDAO:
         conn = self.db_manager.get_connection()
         cursor = conn.cursor()
 
+        # 按需决定是否拉取 LONGTEXT 大字段
+        columns_sql = """
+            id, batch_date, board_name, sub_category, rank_num, book_id,
+            book_title, author_name, metric_name, metric_value_raw, metric_value,
+            tags, book_status, synopsis, cover_url, detail_url, created_at, updated_at
+        """
+        if include_chapter_json:
+            columns_sql += ", chapter_list_json"
+
         try:
             if batch_date:
-                cursor.execute("""
-                    SELECT * FROM fanqie_ranks
+                cursor.execute(f"""
+                    SELECT {columns_sql} FROM fanqie_ranks
                     WHERE book_id = %s AND batch_date = %s
                     LIMIT 1
                 """, (book_id, batch_date))
             else:
-                cursor.execute("""
-                    SELECT * FROM fanqie_ranks
+                cursor.execute(f"""
+                    SELECT {columns_sql} FROM fanqie_ranks
                     WHERE book_id = %s
                     ORDER BY batch_date DESC
                     LIMIT 1
@@ -348,8 +361,8 @@ class FanqieRankDAO:
                 return None
 
             # 转换为字典（根据列名）
-            columns = [desc[0] for desc in cursor.description]
-            return dict(zip(columns, row))
+            col_names = [desc[0] for desc in cursor.description]
+            return dict(zip(col_names, row))
 
         except Exception as e:
             logger.error(f"[DAO] 查询书籍失败：{e}")

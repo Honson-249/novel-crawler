@@ -29,21 +29,19 @@ from src.novel_crawler.config.database import db_manager
 def export_data():
     """导出数据到 CSV 和 JSON"""
     conn = db_manager().get_connection()
-    conn.row_factory = lambda cursor, row: {desc[0]: row[idx] for idx, desc in enumerate(cursor.description)}
     cur = conn.cursor()
 
-    # 查询所有数据
-    cur.execute('SELECT * FROM fanqie_ranks ORDER BY board_name, rank_num')
-    rows = cur.fetchall()
-
-    # 获取列名
+    # 查询所有数据（排除 chapter_list_json 大字段，避免全量拉取 LONGTEXT）
     columns = [
         'id', 'batch_date', 'board_name', 'sub_category', 'rank_num',
         'book_id', 'book_title', 'author_name', 'metric_name',
         'metric_value_raw', 'metric_value', 'tags', 'book_status',
-        'synopsis', 'chapter_list_json', 'cover_url', 'detail_url',
+        'synopsis', 'cover_url', 'detail_url',
         'created_at', 'updated_at'
     ]
+    cur.execute(f"SELECT {', '.join(columns)} FROM fanqie_ranks ORDER BY board_name, rank_num")
+    raw_rows = cur.fetchall()
+    rows = [dict(zip(columns, row)) for row in raw_rows]
 
     timestamp = datetime.now().strftime('%Y-%m-%d')
 
