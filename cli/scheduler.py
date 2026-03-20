@@ -377,6 +377,7 @@ class MultiSiteScheduler:
             # 默认配置
             cfg.setdefault("hour", 0)
             cfg.setdefault("minute", 10)
+            cfg.setdefault("workers", 5)
             cfg.setdefault("translate", True)
             cfg.setdefault("translate_workers", 20)
             cfg.setdefault("translate_llm_batch", 1)

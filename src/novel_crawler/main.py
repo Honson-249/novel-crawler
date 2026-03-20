@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         reelshort_config={
             "hour": 0,
             "minute": 10,
+            "workers": 5,
             "translate": True,
             "translate_workers": 20,
             "translate_llm_batch": 1,
