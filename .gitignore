@@ -50,3 +50,14 @@ tests/
 
 # 调试目录
 debug/
+
+# 本地导出数据目录（不提交）
+exported_drama_zh/
+data/
+
+# 本地导出脚本（不提交）
+scripts/auto_export_daily.py
+scripts/setup_export_task.bat
+
+# 外部爬虫数据目录（不提交）
+# D:\dev\projects\crawler-data\ 下的所有数据
