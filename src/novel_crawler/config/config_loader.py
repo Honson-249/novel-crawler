@@ -193,6 +193,17 @@ class AlertConfig(BaseModel):
     min_failure_rate: float = Field(default=0.1, description="最小失败率阈值")
 
 
+class LlmConfig(BaseSettings):
+    """大模型配置"""
+    model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
+
+    api_key: str = Field(default="", description="LLM API Key")
+    base_url: str = Field(default="", description="LLM Base URL")
+    model: str = Field(default="qwen3-32b", description="模型名称")
+    max_concurrency: int = Field(default=20, description="最大并发请求数")
+    timeout: int = Field(default=120, description="请求超时秒数")
+
+
 # ==================== 配置加载器 ====================
 
 class ConfigLoader:
@@ -338,6 +349,14 @@ class ConfigLoader:
         self._config_cache["fanqie"] = config
         return config
 
+    def get_llm_config(self) -> LlmConfig:
+        """获取大模型配置"""
+        if "llm" in self._config_cache:
+            return self._config_cache["llm"]
+        config = LlmConfig()
+        self._config_cache["llm"] = config
+        return config
+
     def reload(self):
         """重新加载配置（热重载）"""
         logger.info("重新加载配置...")
@@ -408,6 +427,11 @@ def get_alert_config() -> AlertConfig:
     return get_config_loader().get_alert_config()
 
 
+def get_llm_config() -> LlmConfig:
+    """获取大模型配置"""
+    return get_config_loader().get_llm_config()
+
+
 __all__ = [
     # 配置模型
     "DatabaseConfig",
@@ -416,6 +440,7 @@ __all__ = [
     "FanqieConfig",
     "LogConfig",
     "AlertConfig",
+    "LlmConfig",
     # 配置加载器
     "ConfigLoader",
     "get_config_loader",
@@ -425,4 +450,5 @@ __all__ = [
     "get_spider_config",
     "get_log_config",
     "get_fanqie_config",
+    "get_llm_config",
 ]

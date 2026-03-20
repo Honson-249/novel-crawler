@@ -14,6 +14,7 @@ from src.novel_crawler.config.config_loader import (
     get_spider_config,
     get_log_config,
     get_fanqie_config,
+    get_llm_config,
     ConfigLoader,
     DatabaseConfig,
     RedisConfig,
@@ -21,6 +22,7 @@ from src.novel_crawler.config.config_loader import (
     FanqieConfig,
     LogConfig,
     AlertConfig,
+    LlmConfig,
 )
 from src.novel_crawler.config.secrets import get_secrets_manager, get_secret, get_required_secret
 from src.novel_crawler.config.database import (
@@ -73,6 +75,7 @@ __all__ = [
     "FanqieConfig",
     "LogConfig",
     "AlertConfig",
+    "LlmConfig",
     # 配置加载器
     "ConfigLoader",
     "get_config_loader",
@@ -82,6 +85,7 @@ __all__ = [
     "get_spider_config",
     "get_log_config",
     "get_fanqie_config",
+    "get_llm_config",
     # 密钥管理
     "get_secrets_manager",
     "get_secret",

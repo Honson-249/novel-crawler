@@ -31,11 +31,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from src.novel_crawler.api import tasks_router, books_router, stats_router
-from src.novel_crawler.services.task_service import get_task_service
 from src.novel_crawler.tools.cache_manager import load_books_from_db_to_cache, get_cache_stats
+from cli.scheduler import FanqieScheduler, ReelShortScheduler, DramaShortScheduler, MultiSiteScheduler
 
 
 # ==================== 应用生命周期管理 ====================
+
+# 全局多站点调度器实例
+_multi_site_scheduler = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
@@ -45,19 +49,45 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     - 启动时：初始化服务、启动定时任务、预热缓存
     - 关闭时：清理资源、关闭调度器
     """
+    global _multi_site_scheduler
+
     # 启动时执行
     app_version = app.version
     logger.info(f"Novel Crawler 服务启动中... [版本 v{app_version}]")
 
-    # 初始化任务服务并启动定时任务
-    task_service = get_task_service()
-    task_service.add_daily_job(hour=0, minute=0)
-    task_service.start_scheduler()
+    # ==================== 启动多站点定时任务 ====================
+    # 创建并启动多站点调度器
+    _multi_site_scheduler = MultiSiteScheduler(
+        sites=["fanqie", "reelshort", "dramashort"],
+        fanqie_config={
+            "hour": 0,
+            "minute": 0,
+            "limit": 30,
+        },
+        reelshort_config={
+            "hour": 0,
+            "minute": 10,
+            "translate": True,
+            "translate_workers": 20,
+            "translate_llm_batch": 1,
+        },
+        dramashort_config={
+            "hour": 0,
+            "minute": 10,
+            "translate": True,
+            "translate_workers": 20,
+            "translate_llm_batch": 1,
+        },
+    )
 
-    job = task_service.scheduler.get_job('daily_crawl')
-    next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job and job.next_run_time else None
-    logger.info(f"定时任务已启动 - 下次执行时间：{next_run}")
+    # 在后台启动调度器（非阻塞）
+    asyncio.create_task(_multi_site_scheduler.start())
+    logger.info("多站点定时任务已启动：")
+    logger.info("  - 番茄小说：每天 00:00 爬取榜单（不爬章节）")
+    logger.info("  - ReelShort：每天 00:10 全量爬取 + 自动翻译")
+    logger.info("  - DramaShorts：每天 00:10 全量爬取 + 自动翻译")
 
+    # ==================== 预热缓存 ====================
     # 检查并预热缓存（如果 Redis 缓存为空，从数据库加载最近一天的数据）
     try:
         stats = get_cache_stats()
@@ -77,16 +107,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     # 关闭时执行
     logger.info("Novel Crawler 服务关闭中...")
-    task_service.shutdown_scheduler()
-    logger.info("定时任务已停止")
+    if _multi_site_scheduler:
+        await _multi_site_scheduler.shutdown()
+    logger.info("多站点定时任务已停止")
 
 
 # ==================== FastAPI 应用 ====================
 
 app = FastAPI(
     title="小说爬取服务 API",
-    description="多站点小说爬取服务 - 当前已集成番茄小说，提供定时任务管理和数据查询接口",
-    version="1.0.0",
+    description="多站点爬取服务 - 已集成番茄小说、ReelShort、DramaShorts，提供定时任务管理和数据查询接口",
+    version="1.1.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -129,9 +160,9 @@ async def root():
     """根路径"""
     return {
         "name": "Novel Crawler API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "status": "running",
-        "integrated_sites": ["fanqie"],
+        "integrated_sites": ["fanqie", "reelshort", "dramashort"],
         "docs": "/docs",
     }
 

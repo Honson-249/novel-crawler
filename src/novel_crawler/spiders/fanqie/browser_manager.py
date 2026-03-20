@@ -260,7 +260,7 @@ class BrowserManager:
         delete navigator.__proto__.webdriver;
     """
 
-    def __init__(self, config: SpiderConfig, user_data_dir: Path):
+    def __init__(self, config: SpiderConfig, user_data_dir: Path = None):
         self.config = config
         self.user_data_dir = user_data_dir
         self.browser: Browser = None
@@ -282,8 +282,9 @@ class BrowserManager:
         # 生成随机指纹
         ua = random.choice(self.config.user_agents)
 
-        # 用户数据目录 - 持久化浏览器状态
-        self.user_data_dir.mkdir(exist_ok=True)
+        # 用户数据目录（可选，传入时自动创建）
+        if self.user_data_dir:
+            self.user_data_dir.mkdir(exist_ok=True)
 
         # 启动浏览器
         try:

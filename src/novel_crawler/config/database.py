@@ -175,6 +175,7 @@ class DatabaseManager:
                 language VARCHAR(50) NOT NULL,
                 tab_name VARCHAR(100) NOT NULL,
                 tag_name VARCHAR(500) NOT NULL,
+                tag_name_zh VARCHAR(500) DEFAULT NULL COMMENT '简体中文译名，由翻译服务填充',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 UNIQUE KEY unique_tag (language, tab_name, tag_name(200)),
@@ -189,9 +190,9 @@ class DatabaseManager:
                 batch_date DATE NOT NULL,
                 language VARCHAR(50) NOT NULL,
                 board_name VARCHAR(100),
-                sub_category VARCHAR(200),
                 detail_url TEXT,
                 series_title VARCHAR(500),
+                t_book_id BIGINT DEFAULT NULL COMMENT '平台内置全局排序序号，可还原平台默认排序',
                 play_count_raw VARCHAR(50),
                 play_count BIGINT,
                 favorite_count_raw VARCHAR(50),
@@ -205,11 +206,41 @@ class DatabaseManager:
                 synopsis TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_record (batch_date, language, board_name(50), sub_category(100), detail_url(200)),
+                UNIQUE KEY unique_record (batch_date, language, board_name(50), detail_url(200)),
                 INDEX idx_batch (batch_date),
                 INDEX idx_language (language),
                 INDEX idx_board (board_name),
-                INDEX idx_sub_category (sub_category(100))
+                INDEX idx_t_book_id (t_book_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+
+            # ReelShort 中文翻译表
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reelshort_drama_zh (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                source_id INT NOT NULL COMMENT '关联 reelshort_drama.id',
+                batch_date DATE NOT NULL,
+                language VARCHAR(50) NOT NULL,
+                board_name VARCHAR(100),
+                detail_url TEXT,
+                series_title VARCHAR(500),
+                play_count_raw VARCHAR(50),
+                play_count BIGINT,
+                favorite_count_raw VARCHAR(50),
+                favorite_count BIGINT,
+                tag_list_json TEXT,
+                actors_tags TEXT,
+                actresses_tags TEXT,
+                identity_tags TEXT,
+                story_beat_tags TEXT,
+                genre_tags TEXT,
+                synopsis TEXT,
+                translated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_source (source_id),
+                INDEX idx_batch (batch_date),
+                INDEX idx_language (language)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """)
 
@@ -229,6 +260,10 @@ class DatabaseManager:
                 play_count BIGINT,
                 favorite_count_raw VARCHAR(50),
                 favorite_count BIGINT,
+                likes_count_raw VARCHAR(50),
+                likes_count BIGINT,
+                episodes_count INT,
+                score DECIMAL(4,2),
                 synopsis TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -237,6 +272,35 @@ class DatabaseManager:
                 INDEX idx_language (language),
                 INDEX idx_board (board_name),
                 INDEX idx_board_order (board_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+
+            # DramaShorts 中文翻译表
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dramashort_drama_zh (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                source_id INT NOT NULL COMMENT '关联 dramashort_drama.id',
+                batch_date DATE NOT NULL,
+                language VARCHAR(50) NOT NULL,
+                board_name VARCHAR(100),
+                board_order INT,
+                detail_url TEXT,
+                series_title VARCHAR(500),
+                play_count_raw VARCHAR(50),
+                play_count BIGINT,
+                favorite_count_raw VARCHAR(50),
+                favorite_count BIGINT,
+                likes_count_raw VARCHAR(50),
+                likes_count BIGINT,
+                episodes_count INT,
+                score DECIMAL(4,2),
+                synopsis TEXT,
+                translated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_source (source_id),
+                INDEX idx_batch (batch_date),
+                INDEX idx_language (language)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """)
 
