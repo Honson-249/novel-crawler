@@ -40,6 +40,11 @@ _TEXT_FIELDS = ["series_title", "synopsis"]
 _REUSABLE_FIELDS = ["series_title", "synopsis"]
 
 
+def _has_chinese(text: str) -> bool:
+    """判断字符串是否包含中文字符，用于验证翻译结果有效性"""
+    return any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
+
+
 async def _translate_group(
     group: List[Dict],
     client: LLMClient,
@@ -71,9 +76,12 @@ async def _translate_group(
             cached = url_cache[detail_url]
             for field in _REUSABLE_FIELDS:
                 r[field] = cached.get(field, record.get(field))
+            # URL 缓存命中：board_name 从 board_cache 填充
+            orig_board = record.get("board_name") or ""
+            if orig_board and orig_board in board_cache:
+                r["board_name"] = board_cache[orig_board]
             url_hit_ref[0] += 1
             results.append((r, True))
-            # URL 缓存命中：board_name 由 board_cache 处理，无需 LLM
         else:
             results.append((r, False))
             need_translate.append((i, record, False))  # 全量翻译
@@ -135,8 +143,9 @@ async def _translate_group(
                     if field in translated and translated[field]:
                         r[field] = translated[field]
                 # 新翻译的记录写入 URL 缓存（只缓存可复用字段，不含 board_name）
+                # 只缓存确实包含中文的结果，防止 LLM 返回原文时污染缓存
                 detail_url = record.get("detail_url") or ""
-                if detail_url:
+                if detail_url and _has_chinese(r.get("series_title", "")):
                     url_cache[detail_url] = {field: r.get(field) for field in _REUSABLE_FIELDS}
 
         results[group_idx] = (r, reused)
@@ -196,16 +205,33 @@ async def run_translate(
     for lang, lang_records in by_language.items():
         logger.info(f"[DS翻译] 语言 [{lang}]：{len(lang_records)} 条")
 
-        url_cache = dao.find_translated_by_url(lang)
+        raw_url_cache = dao.find_translated_by_url(lang)
+        # 过滤掉 series_title 不含中文的脏数据（历史批次翻译失败写入的英文原文）
+        url_cache = {
+            url: data
+            for url, data in raw_url_cache.items()
+            if _has_chinese(data.get("series_title", ""))
+        }
+        if len(url_cache) < len(raw_url_cache):
+            logger.warning(
+                f"[DS翻译] [{lang}] URL 缓存过滤掉 {len(raw_url_cache) - len(url_cache)} 条非中文脏数据"
+            )
         # 预翻译所有唯一 board_name，避免并发写缓存导致不一致
         unique_boards = list({r.get("board_name") or "" for r in lang_records} - {""})
         board_cache: Dict[str, str] = {}
         if unique_boards:
             board_payloads = [{"board_name": b} for b in unique_boards]
             board_translated = await client.translate_records_batch(board_payloads)
+            _BOARD_NAME_MANUAL: Dict[str, str] = {
+                "DramaShorts Plus": "短剧精选 Plus",
+            }
             for orig, trans in zip(unique_boards, board_translated):
-                if trans.get("board_name"):
-                    board_cache[orig] = trans["board_name"]
+                translated_val = trans.get("board_name", "")
+                # LLM 返回原文（未翻译）时使用手动指定的翻译
+                if translated_val == orig:
+                    translated_val = _BOARD_NAME_MANUAL.get(orig, orig)
+                if translated_val:
+                    board_cache[orig] = translated_val
             logger.info(f"[DS翻译] 预翻译 board_name：{len(board_cache)} 个唯一榜单名")
         api_calls_ref = [0]
         url_hit_ref = [0]

@@ -3,24 +3,29 @@ ReelShort 爬虫主模块
 
 爬取路径：
   1. 遍历语言列表（如 en、pt）
-  2. 用 _next/data API（httpx）获取各 Tab 入口页标签列表，写入 DB（reelshort_tags）
-  3. 用 _next/data API（httpx）直接翻页爬取 Tab 总列表（无需遍历子 tag）
-  4. 用 _next/data API（httpx）获取详情（标签、简介），category_id 直接分类
+  2. 用 _next/data API（httpx）获取各 Tab 入口页标签列表 → 缓存在内存
+  3. 用 _next/data API（httpx）直接翻页爬取 Tab 总列表
+  4. 用 _next/data API（httpx）获取详情（标签、简介）
+  5. 利用标签缓存做分类 → 写入 CSV 文件
 
 数据写入：
-  - reelshort_tags 表：各 Tab 下的子分类标签维表
-  - reelshort_drama 表：榜单明细（含详情页数据，标签已分类）
-    唯一键：(batch_date, language, board_name, detail_url)，无 sub_category
+  - CSV 文件：/data/reelshort/{batch_date}/{language}.csv
+  - 字段：batch_date, language, detail_url, series_title, play_count, favorite_count,
+         synopsis, tag_list_json, identity_tags, story_beat_tags, genre_tags
+  - 同一天运行会覆盖已有文件
 
 性能说明：
   - 全程使用 httpx HTTP 请求，无需 Playwright，速度快 10 倍以上
+  - 标签缓存：每语言爬完后立即清理，节省内存
   - 详情缓存：同语言内同一 book_id 只请求一次
-  - 断点续爬：记录已爬页码，重启时从上次中断的页码继续
 """
 import asyncio
+import csv
+import json
+import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
 
@@ -28,8 +33,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from src.novel_crawler.config import LOG_CONFIG, LOG_DIR
-from src.novel_crawler.config.database import db_manager, get_utc8_date
-from src.novel_crawler.dao.reelshort_dao import get_reelshort_dao
+from src.novel_crawler.config.database import get_utc8_date
 from .api_client import ReelShortApiClient
 from .config import ReelShortConfig
 from .page_parser import ReelShortPageParser
@@ -53,20 +57,20 @@ logger.add(
 
 class ReelShortSpider:
     """
-    ReelShort 短剧爬虫
+    ReelShort 短剧爬虫（CSV 存储版本）
 
     爬取策略：
     - 全程使用 httpx 调用 _next/data API，无需 Playwright
     - Tab 入口页 API 返回完整标签列表（含 id 和 text）
     - 列表页 API 支持分页遍历，详情页 API 含标签分类（category_id）
-    - 同语言内同一 book_id 只请求一次详情（内存缓存 + DB 兜底）
-    - 每个 Tab 爬取完成后自动异步触发翻译（translate=True 时）
+    - 标签参照集仅缓存在内存中，每语言爬完后立即清理
+    - 同语言内同一 book_id 只请求一次详情（内存缓存）
+    - 数据直接写入 CSV 文件，不依赖数据库
     """
 
     def __init__(self):
         self.config = ReelShortConfig()
         self.page_parser = ReelShortPageParser()
-        self.dao = get_reelshort_dao(db_manager())
         self.batch_date = get_utc8_date()
 
         # 动态发现的 Tab 列表（run() 时填充）
@@ -78,8 +82,19 @@ class ReelShortSpider:
         # 详情页缓存并发锁
         self._detail_cache_lock = asyncio.Lock()
 
-        # 后台翻译任务集合（fire-and-forget，run 结束时等待）
-        self._translate_tasks: List[asyncio.Task] = []
+        # 标签参照集缓存：{language: {tab_name: {tag_name_set}}}
+        # 用于标签分类：Actors/Actresses/Identities/Story Beats
+        self._tag_reference_cache: Dict[str, Dict[str, Set[str]]] = {}
+
+        # 标签缓存并发锁
+        self._tag_cache_lock = asyncio.Lock()
+
+        # 已爬取的 detail_url 集合（同语言内去重，避免重复爬取）
+        # key: language, value: Set[detail_url]
+        self._crawled_urls: Dict[str, Set[str]] = {}
+
+        # 已爬取 URL 锁
+        self._crawled_urls_lock = asyncio.Lock()
 
     # ==================== 主入口 ====================
 
@@ -88,9 +103,6 @@ class ReelShortSpider:
         languages: Optional[List[str]] = None,
         crawl_detail: bool = True,
         workers: int = 1,
-        translate: bool = False,
-        translate_workers: int = 5,
-        translate_llm_batch: int = 5,
     ) -> Dict[str, Any]:
         """
         主爬取入口
@@ -99,15 +111,12 @@ class ReelShortSpider:
             languages: 要爬取的语言列表，None 表示使用 config.default_languages 全量爬取
             crawl_detail: 是否同步爬取详情页（默认 True）
             workers: 最大并发语言数
-            translate: 每个 Tab 爬完后自动异步触发翻译（默认 False）
-            translate_workers: 翻译并发请求数（默认 5）
-            translate_llm_batch: 每次 LLM 请求合并的记录数（默认 5）
 
         Returns:
-            统计字典：{"tags": 标签数, "dramas": 剧集数, "details": 详情更新数}
+            统计字典：{"dramas": 剧集数, "details": 详情更新数}
         """
         logger.info("=" * 60)
-        logger.info("ReelShort 爬虫启动")
+        logger.info("ReelShort 爬虫启动（CSV 存储版本）")
         logger.info("=" * 60)
 
         target_languages = languages or self.config.default_languages
@@ -120,21 +129,15 @@ class ReelShortSpider:
         logger.info(f"目标语言（共 {len(target_languages)} 种）：{target_languages}")
         logger.info(f"Tab 列表：{[t['tab_slug'] for t in self._discovered_tabs]}")
         logger.info(f"并发 Worker 数：{workers}")
-        if translate:
-            logger.info(f"自动翻译：开启（workers={translate_workers}, llm_batch={translate_llm_batch}）")
 
-        total_tags = 0
         total_dramas = 0
         total_details = 0
-        self._translate_tasks = []
 
         semaphore = asyncio.Semaphore(workers)
 
         async def _run_with_sem(lang: str):
             async with semaphore:
-                return await self._crawl_language_worker(
-                    lang, crawl_detail, translate, translate_workers, translate_llm_batch
-                )
+                return await self._crawl_language_worker(lang, crawl_detail)
 
         results = await asyncio.gather(
             *[_run_with_sem(lang) for lang in target_languages],
@@ -144,25 +147,16 @@ class ReelShortSpider:
             if isinstance(result, Exception):
                 logger.error(f"[{lang}] 爬取失败：{result}")
             else:
-                total_tags += result.get("tags", 0)
                 total_dramas += result.get("dramas", 0)
                 total_details += result.get("details", 0)
 
-        # 等待所有后台翻译任务完成
-        if self._translate_tasks:
-            logger.info(f"[翻译] 等待 {len(self._translate_tasks)} 个后台翻译任务完成...")
-            await asyncio.gather(*self._translate_tasks, return_exceptions=True)
-            logger.info("[翻译] 所有后台翻译任务完成")
-
         logger.info("\n" + "=" * 60)
         logger.info("[OK] ReelShort 爬取完成")
-        logger.info(f"  - 标签维表：{total_tags} 条")
         logger.info(f"  - 榜单明细：{total_dramas} 条")
         logger.info(f"  - 详情更新：{total_details} 条")
         logger.info("=" * 60)
 
         return {
-            "tags": total_tags,
             "dramas": total_dramas,
             "details": total_details,
         }
@@ -173,9 +167,6 @@ class ReelShortSpider:
         self,
         language: str,
         crawl_detail: bool,
-        translate: bool = False,
-        translate_workers: int = 5,
-        translate_llm_batch: int = 5,
     ) -> Dict[str, int]:
         """
         单语言爬取 Worker，持有独立的 httpx 连接池，多 Worker 并发安全
@@ -185,18 +176,28 @@ class ReelShortSpider:
         logger.info(f"{'='*60}")
 
         try:
-            return await self._crawl_language(
-                language, crawl_detail, translate, translate_workers, translate_llm_batch
-            )
+            return await self._crawl_language(language, crawl_detail)
         except Exception as e:
             logger.error(f"[{language}] Worker 异常：{e}")
             raise
         finally:
+            # 清理该语言的标签缓存（方案 A：每语言完成后立即清理）
+            async with self._tag_cache_lock:
+                self._tag_reference_cache.pop(language, None)
+                logger.info(f"[{language}] 已清理标签缓存")
+
+            # 清理已爬取 URL 缓存
+            async with self._crawled_urls_lock:
+                crawled_count = len(self._crawled_urls.get(language, set()))
+                self._crawled_urls.pop(language, None)
+                logger.info(f"[{language}] 已清理已爬取 URL 缓存 ({crawled_count} 条)")
+
+            # 清理详情缓存
             async with self._detail_cache_lock:
                 cleared = len(self._detail_cache)
                 self._detail_cache.clear()
-            if cleared:
-                logger.info(f"[{language}] 已清理详情缓存 {cleared} 条")
+                if cleared:
+                    logger.info(f"[{language}] 已清理详情缓存 {cleared} 条")
 
     # ==================== 语言级爬取 ====================
 
@@ -204,15 +205,10 @@ class ReelShortSpider:
         self,
         language: str,
         crawl_detail: bool,
-        translate: bool = False,
-        translate_workers: int = 5,
-        translate_llm_batch: int = 5,
     ) -> Dict[str, int]:
         """
-        处理单个语言的完整爬取（全程使用 httpx API，无需 Playwright）
-        每个 Tab 爬完后，若 translate=True 则异步触发该语言的翻译任务
+        处理单个语言的完整爬取（全程使用 httpx API，数据写入 CSV）
         """
-        total_tags = 0
         total_dramas = 0
         total_details = 0
 
@@ -220,9 +216,9 @@ class ReelShortSpider:
             delay_min=self.config.page_delay_min,
             delay_max=self.config.page_delay_max,
         ) as api_client:
-            # 第一阶段：通过 API 获取各 Tab 的子分类标签列表并写入 DB
+            # 第一阶段：获取各 Tab 的子分类标签列表并缓存到内存
             tab_tag_map: Dict[str, List[Dict[str, str]]] = {}
-            logger.info(f"  [{language}] 第一阶段：获取 Tab 标签列表（API）")
+            logger.info(f"  [{language}] 第一阶段：获取 Tab 标签列表（API）→ 缓存到内存")
             for tab_info in self._discovered_tabs:
                 tab_name = tab_info["tab_name"]
                 tab_slug = tab_info["tab_slug"]
@@ -235,72 +231,91 @@ class ReelShortSpider:
 
                 tag_items = self.page_parser.parse_api_tab_index(data, tab_slug, tab_name, language)
                 tab_tag_map[tab_name] = tag_items
-                total_tags += len(tag_items)
                 logger.info(f"  [{language}] Tab '{tab_name}' 共 {len(tag_items)} 个子分类标签")
 
-                records = [
-                    {"language": language, "tab_name": tab_name, "tag_name": item["tag_name"]}
-                    for item in tag_items
-                ]
-                inserted = self.dao.insert_tags_batch(records, self.batch_date)
-                logger.info(f"  [DB] reelshort_tags 写入 {inserted} 条（Tab: {tab_name}）")
+                # 将标签存入缓存（用于后续分类）
+                async with self._tag_cache_lock:
+                    if language not in self._tag_reference_cache:
+                        self._tag_reference_cache[language] = {}
+                    # 提取 tag_name 集合
+                    self._tag_reference_cache[language][tab_name] = {
+                        item["tag_name"] for item in tag_items
+                    }
 
-            # 第二阶段：按 Tab 总列表翻页爬取（不再遍历子 tag）
-            logger.info(f"  [{language}] 第二阶段：爬取 Tab 总列表和详情（API）")
+            # 第二阶段：按 Tab 总列表翻页爬取
+            logger.info(f"  [{language}] 第二阶段：爬取 Tab 总列表和详情（API）→ 每 Tab 写入 CSV")
+
+            # 初始化已爬取 URL 集合（同语言内去重）
+            async with self._crawled_urls_lock:
+                self._crawled_urls[language] = set()
+
+            # CSV 文件路径（每 Tab 追加写入）
+            # 使用相对路径：项目根目录下的 data/reelshort 目录
+            csv_dir = Path("data") / "reelshort" / self.batch_date
+            csv_dir.mkdir(parents=True, exist_ok=True)  # 自动创建 data/reelshort/{日期} 所有层级
+
+            # 爬取过程中使用 crawling_ 前缀，完成后重命名为正式文件
+            temp_csv_path = csv_dir / f"crawling_{language}.csv"
+            final_csv_path = csv_dir / f"{language}.csv"
+
+            # 删除旧文件（如果存在），确保每次运行都是全新覆盖
+            if temp_csv_path.exists():
+                temp_csv_path.unlink()
+                logger.info(f"  [{language}] 已删除旧的临时 CSV 文件")
+            if final_csv_path.exists():
+                final_csv_path.unlink()
+                logger.info(f"  [{language}] 已删除旧的正式 CSV 文件，准备覆盖")
+
+            # 标记是否首次写入（用于决定是否写 header）
+            is_first_write = True
+
+            # 已写入 CSV 的 URL 集合（跨 Tab 去重）
+            written_urls: Set[str] = set()
+
             for tab_info in self._discovered_tabs:
                 tab_name = tab_info["tab_name"]
                 tab_slug = tab_info["tab_slug"]
 
                 logger.info(f"\n  [{language}] Tab: {tab_name}")
 
-                start_page = self.dao.find_last_crawled_page(self.batch_date, language, tab_name)
-                if start_page > 1:
-                    logger.info(f"  [{language}][{tab_name}] 检测到已爬 {start_page - 1} 页，从第 {start_page} 页续爬")
-
-                dramas, details_count = await self._crawl_tab_total_list(
-                    tab_name, tab_slug, language, api_client, crawl_detail, start_page
+                tab_dramas, details_count = await self._crawl_tab_total_list(
+                    tab_name, tab_slug, language, api_client, crawl_detail
                 )
-                total_dramas += dramas
+
+                # 去重：跨 Tab 重复的剧集剔除
+                unique_dramas = []
+                cross_tab_duplicates = 0
+                for drama in tab_dramas:
+                    url = drama.get("detail_url")
+                    if url and url in written_urls:
+                        cross_tab_duplicates += 1
+                        continue
+                    written_urls.add(url)
+                    unique_dramas.append(drama)
+
+                if cross_tab_duplicates > 0:
+                    logger.info(f"  [{language}][{tab_name}] 跨 Tab 去重：移除 {cross_tab_duplicates} 条")
+
+                # 本 Tab 新增的剧集数（去重后）
+                total_dramas += len(unique_dramas)
                 total_details += details_count
 
-                # Tab 爬完后，异步触发翻译（fire-and-forget）
-                if translate:
-                    self._fire_translate(language, translate_workers, translate_llm_batch, tab_name)
+                # 写入 CSV（追加模式）
+                logger.info(f"  [{language}][{tab_name}] 写入 CSV：{len(unique_dramas)} 条记录")
+                self._write_to_csv(unique_dramas, temp_csv_path, append=not is_first_write)
+                is_first_write = False
+
+            # 所有 Tab 完成后，重命名为正式文件
+            if temp_csv_path.exists():
+                temp_csv_path.rename(final_csv_path)
+                logger.info(f"  [{language}] CSV 写入完成，重命名为 → {final_csv_path}")
+            else:
+                logger.warning(f"  [{language}] CSV 临时文件不存在，可能写入失败")
 
         return {
-            "tags": total_tags,
             "dramas": total_dramas,
             "details": total_details,
         }
-
-    def _fire_translate(
-        self,
-        language: str,
-        workers: int,
-        llm_batch: int,
-        tab_name: str,
-    ) -> None:
-        """在后台异步触发翻译任务（fire-and-forget，不阻塞爬虫）"""
-        from src.novel_crawler.services.reelshort_translate_service import run_translate
-
-        async def _task():
-            logger.info(f"[翻译] [{language}][{tab_name}] Tab 爬取完成，开始后台翻译...")
-            try:
-                stats = await run_translate(
-                    batch_date=self.batch_date,
-                    language=language,
-                    workers=workers,
-                    llm_batch=llm_batch,
-                )
-                logger.info(
-                    f"[翻译] [{language}][{tab_name}] 完成："
-                    f"写入 {stats['translated']} 条（复用 {stats['reused']} 条）"
-                )
-            except Exception as e:
-                logger.error(f"[翻译] [{language}][{tab_name}] 翻译任务失败：{e}")
-
-        task = asyncio.create_task(_task())
-        self._translate_tasks.append(task)
 
     # ==================== Tab 总列表爬取（API）====================
 
@@ -311,169 +326,232 @@ class ReelShortSpider:
         language: str,
         api_client: ReelShortApiClient,
         crawl_detail: bool,
-        start_page: int = 1,
     ) -> tuple:
         """
         通过 Tab 总列表 API 翻页爬取该 Tab 下所有剧集
 
-        不再按子 tag 遍历，直接请求 Tab 级总列表，每页写入一次 DB。
-        断点续爬：start_page > 1 时从指定页码开始，之前的页已爬完。
-
         Returns:
-            (total_dramas, total_details) 元组
+            (dramas_list, details_count) 元组
         """
         ctx = f"[{language}][{tab_name}]"
-        total_dramas = 0
+        all_dramas: List[Dict[str, Any]] = []
         total_details = 0
 
-        # 先获取第一页（或续爬起始页）以拿到总页数
-        data = await api_client.fetch_tab_total_list(language, tab_slug, page=start_page)
+        # 先获取第一页以拿到总页数
+        data = await api_client.fetch_tab_total_list(language, tab_slug, page=1)
         if data is None:
-            logger.error(f"  {ctx} 第 {start_page} 页 API 请求失败，跳过该 Tab")
-            return 0, 0
+            logger.error(f"  {ctx} 第 1 页 API 请求失败，跳过该 Tab")
+            return [], 0
 
-        dramas, total_pages = self.page_parser.parse_api_list_page(data, language)
-        logger.info(f"  {ctx} 共 {total_pages} 页，第 {start_page} 页 {len(dramas)} 部剧集")
+        page_dramas, total_pages = self.page_parser.parse_api_list_page(data, language)
+        logger.info(f"  {ctx} 共 {total_pages} 页，第 1 页 {len(page_dramas)} 部剧集")
 
-        if dramas:
-            d, det = await self._process_page_dramas(
-                dramas, tab_name, language, api_client, crawl_detail, start_page
+        for drama in page_dramas:
+            processed = await self._process_drama(
+                drama, tab_name, language, api_client, crawl_detail
             )
-            total_dramas += d
-            total_details += det
+            if processed:
+                all_dramas.append(processed)
+                total_details += 1
 
-        for page_num in range(start_page + 1, total_pages + 1):
+        for page_num in range(2, total_pages + 1):
             data = await api_client.fetch_tab_total_list(language, tab_slug, page=page_num)
             if data is None:
                 logger.error(f"  {ctx} 第 {page_num} 页 API 请求失败，跳过")
                 continue
             page_dramas, _ = self.page_parser.parse_api_list_page(data, language)
             logger.info(f"  {ctx} 第 {page_num}/{total_pages} 页 {len(page_dramas)} 部剧集")
-            if page_dramas:
-                d, det = await self._process_page_dramas(
-                    page_dramas, tab_name, language, api_client, crawl_detail, page_num
+
+            for drama in page_dramas:
+                processed = await self._process_drama(
+                    drama, tab_name, language, api_client, crawl_detail
                 )
-                total_dramas += d
-                total_details += det
+                if processed:
+                    all_dramas.append(processed)
+                    total_details += 1
 
-        logger.info(f"  {ctx} 完成，共 {total_dramas} 部剧集，{total_details} 条详情")
-        return total_dramas, total_details
+        logger.info(f"  {ctx} 完成，共 {len(all_dramas)} 部剧集，{total_details} 条详情")
+        return all_dramas, total_details
 
-    # ==================== 单页剧集处理（含详情）====================
+    # ==================== 单部剧集处理（含详情）====================
 
-    async def _process_page_dramas(
+    async def _process_drama(
         self,
-        dramas: List[Dict[str, Any]],
+        drama: Dict[str, Any],
         tab_name: str,
         language: str,
         api_client: ReelShortApiClient,
         crawl_detail: bool,
-        page_num: int,
-    ) -> tuple:
+    ) -> Optional[Dict[str, Any]]:
         """
-        处理单页剧集列表：爬取详情（可选）并写入 DB
+        处理单部剧集：爬取详情（可选）并做标签分类
 
         Returns:
-            (dramas_count, details_count) 元组
+            处理后的剧集数据字典
         """
-        details_count = 0
-        ctx = f"[{language}][{tab_name}] 第{page_num}页"
+        book_id = drama.get("book_id", "")
+        detail_url = drama.get("detail_url", "")
+        title = drama.get("series_title", "")
 
-        if crawl_detail:
-            for idx, drama in enumerate(dramas, 1):
-                book_id = drama.get("book_id", "")
-                detail_url = drama.get("detail_url", "")
-                title = drama.get("series_title", "")
-                logger.info(f"    {ctx} [{idx}/{len(dramas)}] {title}")
+        if not book_id:
+            logger.warning(f"      缺少 book_id，跳过：{title}")
+            return None
 
-                if not book_id:
-                    logger.warning(f"      缺少 book_id，跳过：{title}")
-                    continue
+        # 实时去重：检查该 detail_url 是否已经爬取过（同语言内）
+        async with self._crawled_urls_lock:
+            if detail_url in self._crawled_urls.get(language, set()):
+                logger.debug(f"      [URL 已爬取] 跳过：{title} - {detail_url}")
+                return None
 
-                # 内存缓存（同语言内跨 Tab 复用）
-                cache_key = f"{language}:{book_id}"
-                async with self._detail_cache_lock:
-                    cached = self._detail_cache.get(cache_key)
+        # 内存缓存（同语言内跨 Tab 复用）
+        cache_key = f"{language}:{book_id}"
+        async with self._detail_cache_lock:
+            cached = self._detail_cache.get(cache_key)
 
-                if cached:
-                    detail = cached
-                    logger.debug(f"      [内存缓存命中] {title}")
-                else:
-                    db_detail = self.dao.find_detail_by_url(detail_url, language)
-                    if db_detail:
-                        detail = db_detail
-                        async with self._detail_cache_lock:
-                            self._detail_cache[cache_key] = detail
-                        logger.debug(f"      [DB 缓存命中] {title}")
-                    else:
-                        # 用 book_id 请求，api_client 内部自动跟随 __N_REDIRECT 获取正确 slug
-                        api_data = await api_client.fetch_drama_detail(language, book_id)
-                        if api_data:
-                            detail = self.page_parser.parse_api_drama_detail(api_data)
-                            # 详情 API 的 synopsis 优先；若为空则用列表页已有的 synopsis 兜底
-                            if not detail.get("synopsis") and drama.get("synopsis"):
-                                detail["synopsis"] = drama["synopsis"]
-                            if detail.get("synopsis") or detail.get("tag_list"):
-                                async with self._detail_cache_lock:
-                                    self._detail_cache[cache_key] = detail
-                        else:
-                            # 详情 API 失败（如该语言无此剧），用列表页数据兜底
-                            detail = {
-                                "tag_list": [], "actors_tags": [], "actresses_tags": [],
-                                "identity_tags": [], "story_beat_tags": [], "genre_tags": [],
-                                "synopsis": drama.get("synopsis", ""),
-                                "play_count_raw": "", "play_count": None,
-                                "favorite_count_raw": "", "favorite_count": None,
-                            }
-
-                merged = self._merge_drama_data(drama, detail, tab_name, language)
-                saved = self.dao.insert_drama_batch([merged], self.batch_date)
-                logger.debug(f"      [DB] 写入 {saved} 条")
-                details_count += 1
+        if cached:
+            detail = cached
+            logger.debug(f"      [内存缓存命中] {title}")
         else:
-            records = [self._merge_drama_data(d, {}, tab_name, language) for d in dramas]
-            inserted = self.dao.insert_drama_batch(records, self.batch_date)
-            logger.info(f"    {ctx} [DB] 写入 {inserted} 条（无详情）")
+            # 用 book_id 请求，api_client 内部自动跟随 __N_REDIRECT 获取正确 slug
+            api_data = await api_client.fetch_drama_detail(language, book_id)
+            if api_data:
+                detail = self.page_parser.parse_api_drama_detail(api_data)
+                # 详情 API 的 synopsis 优先；若为空则用列表页已有的 synopsis 兜底
+                if not detail.get("synopsis") and drama.get("synopsis"):
+                    detail["synopsis"] = drama["synopsis"]
+                if detail.get("synopsis") or detail.get("tag_list"):
+                    async with self._detail_cache_lock:
+                        self._detail_cache[cache_key] = detail
+            else:
+                # 详情 API 失败（如该语言无此剧），用列表页数据兜底
+                detail = {
+                    "tag_list": [], "synopsis": drama.get("synopsis", ""),
+                    "play_count_raw": "", "play_count": None,
+                    "favorite_count_raw": "", "favorite_count": None,
+                }
 
-        return len(dramas), details_count
+        # 标记该 URL 已爬取
+        async with self._crawled_urls_lock:
+            if language not in self._crawled_urls:
+                self._crawled_urls[language] = set()
+            self._crawled_urls[language].add(detail_url)
 
-    def _merge_drama_data(
+        return self._merge_and_classify_drama(drama, detail, tab_name, language)
+
+    def _merge_and_classify_drama(
         self,
         list_data: Dict[str, Any],
         detail_data: Dict[str, Any],
         tab_name: str,
         language: str,
     ) -> Dict[str, Any]:
-        """合并 API 列表页数据和详情页数据，输出 DB 记录格式（无 sub_category）"""
-        import json
+        """
+        合并 API 列表页数据和详情页数据，并利用标签缓存做分类
 
-        def to_json(lst):
-            return json.dumps(lst, ensure_ascii=False) if lst else None
-
+        输出字段：
+        - batch_date, language, detail_url, series_title
+        - play_count, favorite_count, synopsis
+        - identity_tags, story_beat_tags, genre_tags
+        """
         play_count = detail_data.get("play_count") or list_data.get("play_count")
         favorite_count = detail_data.get("favorite_count") or list_data.get("favorite_count")
-        play_count_raw = detail_data.get("play_count_raw") or list_data.get("play_count_raw") or ""
-        favorite_count_raw = detail_data.get("favorite_count_raw") or list_data.get("favorite_count_raw") or ""
         tag_list = detail_data.get("tag_list", [])
+
+        # 标签分类
+        classified = self._classify_tags(tag_list, language)
 
         return {
             "batch_date": self.batch_date,
             "language": language,
-            "board_name": tab_name,
             "detail_url": list_data.get("detail_url", ""),
             "series_title": list_data.get("series_title", ""),
-            "t_book_id": list_data.get("t_book_id"),
-            "play_count_raw": play_count_raw,
             "play_count": play_count,
-            "favorite_count_raw": favorite_count_raw,
             "favorite_count": favorite_count,
-            "tag_list_json": to_json(tag_list),
-            "actors_tags": to_json(detail_data.get("actors_tags")),
-            "actresses_tags": to_json(detail_data.get("actresses_tags")),
-            "identity_tags": to_json(detail_data.get("identity_tags")),
-            "story_beat_tags": to_json(detail_data.get("story_beat_tags")),
-            "genre_tags": to_json(detail_data.get("genre_tags")),
-            # 详情页 synopsis 优先，列表页 synopsis 兜底（列表页已包含 special_desc）
             "synopsis": detail_data.get("synopsis") or list_data.get("synopsis", ""),
+            "identity_tags": json.dumps(classified["identity_tags"], ensure_ascii=False),
+            "story_beat_tags": json.dumps(classified["story_beat_tags"], ensure_ascii=False),
+            "genre_tags": json.dumps(classified["genre_tags"], ensure_ascii=False),
         }
 
+    def _classify_tags(
+        self,
+        tag_list: List[str],
+        language: str,
+    ) -> Dict[str, List[str]]:
+        """
+        利用标签缓存对 tag_list 进行分类
+
+        分类逻辑：
+        - 在 Actors 参照集中 → 忽略（不要 actors_tags）
+        - 在 Actresses 参照集中 → 忽略（不要 actresses_tags）
+        - 在 Identities 参照集中 → identity_tags
+        - 在 Story Beats 参照集中 → story_beat_tags
+        - 其他 → genre_tags
+
+        Returns:
+            {identity_tags: [], story_beat_tags: [], genre_tags: []}
+        """
+        # 获取该语言的标签参照集
+        lang_refs = self._tag_reference_cache.get(language, {})
+        actors_ref = lang_refs.get("Actors", set())
+        actresses_ref = lang_refs.get("Actresses", set())
+        identity_ref = lang_refs.get("Identities", set())
+        story_beat_ref = lang_refs.get("Story Beats", set())
+
+        identity_tags = []
+        story_beat_tags = []
+        genre_tags = []
+
+        for tag in tag_list:
+            if tag in actors_ref or tag in actresses_ref:
+                # 演员名字标签，忽略
+                continue
+            elif tag in identity_ref:
+                identity_tags.append(tag)
+            elif tag in story_beat_ref:
+                story_beat_tags.append(tag)
+            else:
+                # 不在 Identities/Story Beats 中的都归为 genre_tags
+                genre_tags.append(tag)
+
+        return {
+            "identity_tags": identity_tags,
+            "story_beat_tags": story_beat_tags,
+            "genre_tags": genre_tags,
+        }
+
+    def _write_to_csv(
+        self,
+        dramas: List[Dict[str, Any]],
+        csv_path: Path,
+        append: bool = False,
+    ) -> None:
+        """
+        将剧集数据写入 CSV 文件
+
+        CSV 字段（共 9 列）：
+        - batch_date, language, detail_url, series_title
+        - play_count, favorite_count, synopsis
+        - identity_tags, story_beat_tags, genre_tags
+
+        Args:
+            append: True 为追加模式，False 为覆盖模式（写入 header）
+        """
+        if not dramas:
+            logger.warning(f"  没有数据可写入 CSV")
+            return
+
+        fieldnames = [
+            "batch_date", "language", "detail_url", "series_title",
+            "play_count", "favorite_count", "synopsis",
+            "identity_tags", "story_beat_tags", "genre_tags",
+        ]
+
+        mode = 'a' if append else 'w'
+        with open(csv_path, mode, newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not append:
+                writer.writeheader()
+            writer.writerows(dramas)
+
+        logger.info(f"  CSV 文件已写入：{csv_path}（{len(dramas)} 条记录）")
