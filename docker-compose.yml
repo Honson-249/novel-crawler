@@ -1,74 +1,23 @@
-# 番茄小说爬虫 - Docker Compose 配置
+# ReelShort CSV 爬虫 - Docker Compose 配置
 version: '3.8'
 
 services:
   # Web 服务 + 爬虫
   crawler:
     build: .
-    container_name: fanqie-crawler
+    container_name: reelshort-crawler
+    network_mode: host
     environment:
-      - APP_ENV=${APP_ENV:-prod}
-      - MYSQL_HOST=${MYSQL_HOST:-localhost}
-      - MYSQL_PORT=${MYSQL_PORT:-3306}
-      - MYSQL_USER=${MYSQL_USER:-root}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
-      - MYSQL_DATABASE=${MYSQL_DATABASE:-fanqie_test}
-      - REDIS_HOST=${REDIS_HOST:-localhost}
-      - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_DB=${REDIS_DB:-2}
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      - SPIDER_HEADLESS=true
+      - TZ=Asia/Shanghai
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REELSHORT_API_KEY=${REELSHORT_API_KEY:-kL9pQ2rS4tU6vW8xY0zA1bC3dE5fG7h}
+      # HTTP 代理（可选，如需代理请取消注释并配置）
+      - HTTP_PROXY=http://127.0.0.1:7897
+      - HTTPS_PROXY=http://127.0.0.1:7897
+      # - NO_PROXY=localhost,127.0.0.1,reelshort.com
     volumes:
-      - ./data:/app/data
+      # CSV 数据目录
+      - ./data/reelshort:/app/data/reelshort
+      # 日志目录
       - ./logs:/app/logs
-    ports:
-      - "${API_PORT:-8000}:8000"
-    depends_on:
-      - redis
     restart: unless-stopped
-    networks:
-      - crawler-network
-    profiles:
-      - with-services
-
-  # Redis 服务
-  redis:
-    image: redis:7-alpine
-    container_name: fanqie-redis
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    networks:
-      - crawler-network
-    profiles:
-      - with-services
-
-  # MySQL 服务（可选）
-  mysql:
-    image: mysql:8.0
-    container_name: fanqie-mysql
-    environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-your_root_password}
-      - MYSQL_DATABASE=${MYSQL_DATABASE:-fanqie_test}
-      - MYSQL_CHARSET=utf8mb4
-      - MYSQL_COLLATION=utf8mb4_unicode_ci
-    volumes:
-      - mysql_data:/var/lib/mysql
-    ports:
-      - "${MYSQL_PORT:-3306}:3306"
-    restart: unless-stopped
-    networks:
-      - crawler-network
-    profiles:
-      - with-mysql
-
-networks:
-  crawler-network:
-    driver: bridge
-
-volumes:
-  mysql_data:
-  redis_data:

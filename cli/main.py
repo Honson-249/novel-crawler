@@ -129,16 +129,7 @@ def cmd_warm_cache(args):
     print(f"成功加载 {loaded_count} 本书到缓存")
 
 
-def cmd_reelshort_classify(args):
-    from src.novel_crawler.services.reelshort_classify_service import run_classify
-    stats = run_classify(
-        batch_date=args.date or None,
-        language=args.language or None,
-    )
-    print(f"\n[完成] ReelShort 标签分类后处理结果：")
-    for lang, count in stats.items():
-        print(f"  - [{lang}] 更新 {count} 条")
-    print(f"  合计：{sum(stats.values())} 条")
+# reelshort-classify 命令已废弃：标签分类现在在爬取过程中直接完成
 
 
 async def crawl_reelshort(args):
@@ -151,13 +142,9 @@ async def crawl_reelshort(args):
         languages=languages,
         crawl_detail=not args.no_detail,
         workers=args.workers,
-        translate=args.translate,
-        translate_workers=args.translate_workers,
-        translate_llm_batch=args.translate_llm_batch,
     )
     print(f"\n[完成] ReelShort 爬取结果：")
-    print(f"  - 标签维表写入：{result.get('tags', 0)} 条")
-    print(f"  - 榜单明细写入：{result.get('dramas', 0)} 条")
+    print(f"  - 榜单明细：{result.get('dramas', 0)} 条")
     print(f"  - 详情更新：{result.get('details', 0)} 条")
 
 
@@ -207,9 +194,6 @@ async def crawl_dramashort(args):
     result = await spider.run(
         languages=languages,
         crawl_detail=not args.no_detail,
-        translate=args.translate,
-        translate_workers=args.translate_workers,
-        translate_llm_batch=args.translate_llm_batch,
     )
     print(f"\n[完成] DramaShorts 爬取结果：")
     print(f"  - 榜单明细写入：{result.get('dramas', 0)} 条")
@@ -297,12 +281,6 @@ def main():
   %(prog)s reelshort --languages en                         仅爬取英文数据
   %(prog)s reelshort --no-detail                            仅爬取列表页，不爬取详情页
   %(prog)s reelshort --workers 3                            3 个语言并发爬取
-  %(prog)s reelshort --translate                            爬取并自动翻译（每 Tab 完成后触发）
-  %(prog)s reelshort --translate --translate-workers 20     爬取并翻译，翻译并发数 20
-  %(prog)s reelshort --languages en,pt,zh --workers 3 --translate  并发爬取 3 种语言并自动翻译
-  %(prog)s reelshort-classify                               对今天全部语言做标签分类后处理
-  %(prog)s reelshort-classify --date 2026-03-18             对指定日期做标签分类后处理
-  %(prog)s reelshort-classify --language en                 仅处理英文数据
   %(prog)s reelshort-translate                              翻译今天全部语言数据为简体中文
   %(prog)s reelshort-translate --date 2026-03-19            翻译指定日期的数据
   %(prog)s reelshort-translate --language en                仅翻译英文数据
@@ -311,8 +289,6 @@ def main():
 使用示例（DramaShorts）:
   %(prog)s dramashort                                        爬取 DramaShorts 全部榜单数据（含详情）
   %(prog)s dramashort --no-detail                            仅爬取榜单列表，不爬取详情页
-  %(prog)s dramashort --translate                            爬取并自动翻译（每语言完成后触发）
-  %(prog)s dramashort --translate --translate-workers 20     爬取并翻译，翻译并发数 20
   %(prog)s dramashort-translate                              翻译今天全部语言数据为简体中文
   %(prog)s dramashort-translate --date 2026-03-19            翻译指定日期的数据
   %(prog)s dramashort-translate --language en                仅翻译英文数据
@@ -381,26 +357,11 @@ def main():
     warm_cache_parser.add_argument("--force", action="store_true")
     warm_cache_parser.set_defaults(func=cmd_warm_cache)
 
-    # reelshort-classify
-    reelshort_classify_parser = subparsers.add_parser(
-        "reelshort-classify",
-        help="ReelShort 标签分类后处理",
-    )
-    reelshort_classify_parser.add_argument("--date", type=str, default=None)
-    reelshort_classify_parser.add_argument("--language", type=str, default=None)
-    reelshort_classify_parser.set_defaults(func=cmd_reelshort_classify)
-
     # reelshort
-    reelshort_parser = subparsers.add_parser("reelshort", help="爬取 ReelShort 短剧数据")
+    reelshort_parser = subparsers.add_parser("reelshort", help="爬取 ReelShort 短剧数据（CSV 存储）")
     reelshort_parser.add_argument("--languages", type=str, default=None)
     reelshort_parser.add_argument("--no-detail", action="store_true")
     reelshort_parser.add_argument("--workers", type=int, default=1)
-    reelshort_parser.add_argument("--translate", action="store_true",
-        help="每个 Tab 爬取完成后自动异步触发翻译（写入 reelshort_drama_zh）")
-    reelshort_parser.add_argument("--translate-workers", type=int, default=20,
-        dest="translate_workers", help="翻译并发 LLM 请求数（默认 20）")
-    reelshort_parser.add_argument("--translate-llm-batch", type=int, default=1,
-        dest="translate_llm_batch", help="每次 LLM 请求合并的记录数（默认 1）")
     reelshort_parser.set_defaults(func=crawl_reelshort)
 
     # reelshort-translate
@@ -436,12 +397,6 @@ def main():
     dramashort_parser = subparsers.add_parser("dramashort", help="爬取 DramaShorts 短剧数据")
     dramashort_parser.add_argument("--languages", type=str, default=None)
     dramashort_parser.add_argument("--no-detail", action="store_true")
-    dramashort_parser.add_argument("--translate", action="store_true",
-        help="每个语言爬取完成后自动异步触发翻译（写入 dramashort_drama_zh）")
-    dramashort_parser.add_argument("--translate-workers", type=int, default=20,
-        dest="translate_workers", help="翻译并发 LLM 请求数（默认 20）")
-    dramashort_parser.add_argument("--translate-llm-batch", type=int, default=1,
-        dest="translate_llm_batch", help="每次 LLM 请求合并的记录数（默认 1）")
     dramashort_parser.set_defaults(func=crawl_dramashort)
 
     # dramashort-translate

@@ -157,7 +157,6 @@ class ReelShortScheduler:
 
     爬取策略：
     - 每天凌晨 00:10 自动爬取所有语言
-    - 每爬取完成一个 Tab 自动触发翻译
     - 支持并发爬取多个语言
     """
 
@@ -165,17 +164,11 @@ class ReelShortScheduler:
         self,
         languages: Optional[List[str]] = None,
         workers: int = 1,
-        translate: bool = True,
-        translate_workers: int = 20,
-        translate_llm_batch: int = 1,
         hour: int = 0,
         minute: int = 10,
     ):
         self.languages = languages
         self.workers = workers
-        self.translate = translate
-        self.translate_workers = translate_workers
-        self.translate_llm_batch = translate_llm_batch
         self.hour = hour
         self.minute = minute
         self.scheduler = None
@@ -195,12 +188,8 @@ class ReelShortScheduler:
                     languages=self.languages,
                     crawl_detail=True,
                     workers=self.workers,
-                    translate=self.translate,
-                    translate_workers=self.translate_workers,
-                    translate_llm_batch=self.translate_llm_batch,
                 )
                 logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ReelShort 爬取任务完成")
-                logger.info(f"  - 标签维表写入：{result.get('tags', 0)} 条")
                 logger.info(f"  - 榜单明细写入：{result.get('dramas', 0)} 条")
                 logger.info(f"  - 详情更新：{result.get('details', 0)} 条")
             except Exception as e:
@@ -226,8 +215,7 @@ class ReelShortScheduler:
         self.is_running = True
 
         logger.info(
-            f"ReelShort 调度器已启动 - 每天 {self.hour:02d}:{self.minute:02d} 自动爬取"
-            f"（translate={self.translate}, workers={self.workers}）"
+            f"ReelShort 调度器已启动 - 每天 {self.hour:02d}:{self.minute:02d} 自动爬取 (workers={self.workers})"
         )
         logger.info(f"下次任务执行时间：{self.scheduler.get_job('reelshort_daily_crawl').next_run_time}")
 
@@ -363,7 +351,8 @@ class MultiSiteScheduler:
         reelshort_config: Optional[dict] = None,
         dramashort_config: Optional[dict] = None,
     ):
-        self.sites = sites or ["fanqie", "reelshort", "dramashort"]
+        # 2026-03-24: 暂停 fanqie 和 dramashort 定时任务，只保留 reelshort
+        self.sites = sites or ["reelshort"]
         self.schedulers = []
 
         # 创建各站点调度器
@@ -378,9 +367,6 @@ class MultiSiteScheduler:
             cfg.setdefault("hour", 0)
             cfg.setdefault("minute", 10)
             cfg.setdefault("workers", 5)
-            cfg.setdefault("translate", True)
-            cfg.setdefault("translate_workers", 20)
-            cfg.setdefault("translate_llm_batch", 1)
             self.schedulers.append(ReelShortScheduler(**cfg))
             logger.info("已创建 ReelShort 调度器")
 

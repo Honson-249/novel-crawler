@@ -30,9 +30,8 @@ from loguru import logger
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from src.novel_crawler.api import tasks_router, books_router, stats_router
-from src.novel_crawler.tools.cache_manager import load_books_from_db_to_cache, get_cache_stats
-from cli.scheduler import FanqieScheduler, ReelShortScheduler, DramaShortScheduler, MultiSiteScheduler
+from src.novel_crawler.api import reelshort_router
+from cli.scheduler import MultiSiteScheduler
 
 
 # ==================== 应用生命周期管理 ====================
@@ -56,58 +55,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     logger.info(f"Novel Crawler 服务启动中... [版本 v{app_version}]")
 
     # ==================== 启动多站点定时任务 ====================
+    # 2026-03-24: 暂停 fanqie 和 dramashort，只保留 reelshort（CSV 存储）
     # 创建并启动多站点调度器
     _multi_site_scheduler = MultiSiteScheduler(
-        sites=["fanqie", "reelshort", "dramashort"],
-        fanqie_config={
-            "hour": 0,
-            "minute": 0,
-            "limit": 30,
-        },
+        sites=["reelshort"],
         reelshort_config={
             "hour": 0,
             "minute": 10,
             "workers": 5,
-            "translate": True,
-            "translate_workers": 20,
-            "translate_llm_batch": 1,
-        },
-        dramashort_config={
-            "hour": 0,
-            "minute": 10,
-            "translate": True,
-            "translate_workers": 20,
-            "translate_llm_batch": 1,
         },
     )
 
-    # 在后台启动调度器（非阻塞）
-    asyncio.create_task(_multi_site_scheduler.start())
+    # 在后台启动调度器（非阻塞）- 保存任务引用防止被垃圾回收
+    _ = asyncio.create_task(_multi_site_scheduler.start())
     logger.info("多站点定时任务已启动：")
-    logger.info("  - 番茄小说：每天 00:00 爬取榜单（不爬章节）")
-    logger.info("  - ReelShort：每天 00:10 全量爬取 + 自动翻译")
-    logger.info("  - DramaShorts：每天 00:10 全量爬取 + 自动翻译")
-
-    # ==================== 预热缓存 ====================
-    # 检查并预热缓存（如果 Redis 缓存为空，从数据库加载最近一天的数据）
-    try:
-        stats = get_cache_stats()
-        if stats["total_count"] == 0:
-            logger.info("Redis 缓存为空，正在从数据库加载最近一天的书籍数据...")
-            loaded_count = load_books_from_db_to_cache(force_load=False)
-            if loaded_count > 0:
-                logger.info(f"缓存预热完成：成功加载 {loaded_count} 本书籍")
-            else:
-                logger.warning("缓存预热：没有找到可加载的书籍数据")
-        else:
-            logger.info(f"Redis 缓存已有 {stats['total_count']} 条记录，跳过预热")
-    except Exception as e:
-        logger.warning(f"缓存预热失败（不影响服务运行）: {e}")
+    logger.info("  - ReelShort：每天 00:10 爬取全量（CSV 存储）")
 
     yield
 
     # 关闭时执行
-    logger.info("Novel Crawler 服务关闭中...")
+    logger.info("ReelShort CSV 服务关闭中...")
     if _multi_site_scheduler:
         await _multi_site_scheduler.shutdown()
     logger.info("多站点定时任务已停止")
@@ -116,9 +83,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 # ==================== FastAPI 应用 ====================
 
 app = FastAPI(
-    title="小说爬取服务 API",
-    description="多站点爬取服务 - 已集成番茄小说、ReelShort、DramaShorts，提供定时任务管理和数据查询接口",
-    version="1.1.0",
+    title="ReelShort CSV API",
+    description="ReelShort 短剧爬取服务 - 提供 CSV 数据下载接口",
+    version="1.2.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -160,10 +127,13 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 async def root():
     """根路径"""
     return {
-        "name": "Novel Crawler API",
-        "version": "1.1.0",
+        "name": "ReelShort CSV API",
+        "version": "1.2.0",
         "status": "running",
-        "integrated_sites": ["fanqie", "reelshort", "dramashort"],
+        "endpoints": {
+            "today": "/api/v1/reelshort/csv/{language}",
+            "by_date": "/api/v1/reelshort/csv/{batch_date}/{language}",
+        },
         "docs": "/docs",
     }
 
@@ -177,10 +147,8 @@ async def health_check():
     }
 
 
-# 注册 API 路由
-app.include_router(tasks_router, prefix="/api/v1")
-app.include_router(books_router, prefix="/api/v1")
-app.include_router(stats_router, prefix="/api/v1")
+# 注册 API 路由（只保留 ReelShort CSV 下载接口）
+app.include_router(reelshort_router, prefix="/api/v1")
 
 
 # ==================== 启动命令 ====================
@@ -191,7 +159,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=False,  # 关闭热重载，避免与 Playwright 子进程冲突
         log_level="info",
         # 在 uvicorn 启动日志中显示版本号
